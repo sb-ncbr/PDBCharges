@@ -1,17 +1,21 @@
 import argparse
 from os import path, system
-from Bio import PDB
-from rdkit.Chem import SDMolSupplier, RemoveHs, rdMolAlign, rdmolfiles
-from collections import Counter
-import biotite.structure.io.pdbx as biotite_mmCIF
+from time import time
+import dimorphite_dl
 import biotite.structure as biotite_structure
-from moleculekit import molecule as molit
-from moleculekit.tools.preparation import systemPrepare
+import biotite.structure.io.pdbx as biotite_mmCIF
 
 import hydride
-from pdbfixer import PDBFixer
+from Bio import PDB
+from moleculekit import molecule as molit
+from moleculekit.tools.preparation import systemPrepare
 from openmm.app import PDBxFile
-
+from pdbfixer import PDBFixer
+import numpy as np
+from math import dist
+import gemmi
+from collections import Counter
+import json
 
 
 def load_arguments():
@@ -35,19 +39,13 @@ def load_arguments():
     return args
 
 
-class SelectResidues(PDB.Select):
-    def accept_residue(self, residue):
-        if residue.full_id in self.full_ids:
-            return 1
-        else:
-            return 0
-
 class SelectAtoms(PDB.Select):
     def accept_atom(self, atom):
         if atom.full_id in self.full_ids:
             return 1
         else:
             return 0
+
 
 class ChargesCalculator:
     def __init__(self,
@@ -57,1829 +55,384 @@ class ChargesCalculator:
         self.data_dir = data_dir
         self.pH = pH
         system(f"mkdir {self.data_dir}; "
+               f"mkdir {self.data_dir}/logs; "
                f"cp {mmCIF_file} {self.data_dir}")
         self.mmCIF_file = f"{self.data_dir}/{path.basename(mmCIF_file)}"
+        resnames = [residue.resname for residue in PDB.MMCIFParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0].get_residues()]
+        with open(f"{self.data_dir}/logs/residues_info.txt", "w") as structure_info_file:
+            for resname, count in Counter(resnames).most_common():
+                structure_info_file.write(f"{resname} {count}\n")
+            structure_info_file.write(f"Total {len(resnames)}\n")
+        self.set_of_resnames = set(resnames)
+
+        # We keep a biotite file in memory where we can change only what we want.
+        # For example, pdbfixer sometimes deletes right values in the struct_conn mmCIF block.
+        # So we just read the atom_site block from the fixed file and write it to the self.biotite_mmCIF_file
         self.biotite_mmCIF_file = biotite_mmCIF.CIFFile.read(self.mmCIF_file)
 
 
-
     def calculate_charges(self):
+        self.fix_structure()
+        self.remove_hydrogens()
+        self.protonate_heteroresidues()
+
+        propka_charges = self.protonate_protein()
+        if all(chg == 0 for chg in propka_charges):
+            exit("ERROR! Moleculekit is not modified!")
+            # /home/dargen3/miniconda3/lib/python3.11/site-packages/moleculekit/tools/preparation.py
+            #  line 827 ("ffcharge", "charge")
+            # https://github.com/Acellera/moleculekit/issues/136
+        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/protonated_protein.cif")[0]
+
+        # structure = PDB.PDBParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0]
+        # system(f"cd {self.data_dir} ; pdb2pqr --assign-only {path.basename(self.mmCIF_file)} smazat.pqr")
+        # propka_charges = [float(line.split()[8]) for line in open(f"{self.data_dir}/smazat.pqr").readlines()[:-2]]
 
 
-        def calculate_charge_for_atom(kdtree, atom, radius):
-            selector = SelectAtoms()
-            io = PDB.PDBIO()
-            io.set_structure(structure)
-            nearest_atoms = kdtree.search(atom.coord,radius, level="A")
+        propka_charges = np.nan_to_num(propka_charges)
+        print("spch: " + str(sum(propka_charges)))
 
-            selector.full_ids = set([atom.full_id for atom in nearest_atoms])
-            io.save(f"{substructure_data_dir}/substructure.pdb", selector)
-
-            # system(
-            #  f"cd {substructure_data_dir} ; obabel -h -iPDB -oPDB substructure.pdb > reprotonated_substructure.pdb 2>/dev/null")
-            # with open(f"{substructure_data_dir}/reprotonated_substructure.pdb") as reprotonated_substructure_file:
-            #     atom_lines = [line for line in reprotonated_substructure_file.readlines() if line[:4] in ["ATOM", "HETA"]]
-            #     original_atoms = atom_lines[:len(nearest_atoms)]
-            #     added_atoms = atom_lines[len(nearest_atoms):]
-            # with open(f"{substructure_data_dir}/repaired_substructure.pdb", "w") as repaired_substructure_file:
-            #     repaired_substructure_file.write("".join(original_atoms))
-            #     for line in added_atoms:
-            #         if dist(atom.coord, [float(line[30:38]), float(line[38:46]), float(line[46:54])]) > radius-0.5:
-            #             repaired_substructure_file.write(line)
-            chrg = sum([atom.pchg for atom in nearest_atoms])
-            print(chrg)
-            chrg = round(chrg)
-            system(f"cd {substructure_data_dir} ; "
-                    f"xtb substructure.pdb --gfn 1 --gbsa water --acc 1000 --chrg {chrg} > xtb_output.txt")
-            xtb_output_file_lines = open(f"{substructure_data_dir}/xtb_output.txt").readlines()
-            charge_headline_index = xtb_output_file_lines.index("  Mulliken/CM5 charges         n(s)   n(p)   n(d)\n")
-
-            for si, substructure_atom in enumerate(PDB.PDBParser().get_structure("substructure",
-                                                                                  f"{substructure_data_dir}/substructure.pdb").get_atoms()):
-                if substructure_atom.full_id[1:] == atom.full_id[1:]:
-                    atom_substructure_index = si
-                    break
-
-            return float(xtb_output_file_lines[charge_headline_index + atom_substructure_index + 1].split()[3])
-
-
-
-
-
-        # self.fix_structure()
-        # self.protonate_ligands()
-        # self.protonate_protein()
-        # structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/protonated_protein.cif")[0]
-        # structure = PDB.MMCIFParser(QUIET=True).get_structure("pdb", self.mmCIF_file)[0] # todo change to protonated_protein.cif
-        structure = PDB.PDBParser(QUIET=True).get_structure("pdb", self.mmCIF_file)[0] # todo change to protonated_protein.cif
-
-        propka_charges_L8 = [-0.32,
-                             0.33,
-                             0.55,
-                             0.125,
-                             -0.55,
-                             -0.125,
-                             -0.125,
-                             -0.125,
-                             -0.125,
-                             -0.125,
-                             -0.125,
-                             0.33,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.125,
-                             0.125,
-                             0.125,
-                             0.125,
-                             0.125,
-                             0.33,
-                             0.33,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.35,
-                             -0.35,
-                             -0.7,
-                             -0.7,
-                             0.35,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.45,
-                             0.4,
-                             0.4,
-                             0.4,
-                             0.4,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.35,
-                             -0.35,
-                             -0.7,
-                             -0.7,
-                             0.35,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.45,
-                             0.4,
-                             0.4,
-                             0.4,
-                             0.4,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.1,
-                             -0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.33,
-                             -0.32,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.33,
-                             0.33,
-                             0.33,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             -0.49,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.49,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             -0.49,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.49,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.1,
-                             -0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.35,
-                             -0.35,
-                             -0.7,
-                             -0.7,
-                             0.35,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.45,
-                             0.4,
-                             0.4,
-                             0.4,
-                             0.4,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.35,
-                             -0.35,
-                             -0.7,
-                             -0.7,
-                             0.35,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.45,
-                             0.4,
-                             0.4,
-                             0.4,
-                             0.4,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.29,
-                             -0.55,
-                             -0.29,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.29,
-                             -0.55,
-                             -0.29,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             -0.49,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.49,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.125,
-                             -0.55,
-                             -0.125,
-                             0.155,
-                             -0.4,
-                             0.155,
-                             -0.56,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.125,
-                             0.125,
-                             -0.56,
-                             0.28,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.28,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.29,
-                             -0.55,
-                             -0.29,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.55,
-                             -0.78,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.39,
-                             0.39,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.1,
-                             -0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.125,
-                             -0.55,
-                             0.142,
-                             0.142,
-                             -0.35,
-                             0.141,
-                             -0.35,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.45,
-                             0.125,
-                             0.125,
-                             0.45,
-                             -0.56,
-                             0.28,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.28,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             -0.0,
-                             0.1,
-                             -0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.0,
-                             -0.55,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.55,
-                             0.29,
-                             -0.55,
-                             -0.29,
-                             0.4,
-                             0.0,
-                             0.0,
-                             0.0,
-                             -0.4,
-                             -0.0,
-                             0.1,
-                             -0.55,
-                             -0.55,
-                             0.4,
-                             0.0,
-                             0.0]
-
-
+        for atom, propka_charge in zip(structure.get_atoms(), propka_charges):
+            atom.propka_charge = propka_charge
+            atom.cm5_charge = None
         kdtree = PDB.NeighborSearch(list(structure.get_atoms()))
-        from time import time
-        charges = []
-
-        for atom, pchg in zip(structure.get_atoms(), propka_charges_L8):
-
-
-
-            atom.pchg = pchg
-
-
+        selector = SelectAtoms()
+        io = PDB.PDBIO()
+        io.set_structure(structure)
+        radius = 6
         for i, atom in enumerate(structure.get_atoms()):
-
+            if atom.element == "H":
+                continue
+            if atom.element == "O":
+                if len(kdtree.search(atom.coord, 1.5, level="A")) <= 2:
+                    continue
 
             t = time()
             substructure_data_dir = f"{self.data_dir}/sub_{i}"
             system(f"mkdir {substructure_data_dir}")
 
-            radius = 5
+            atoms_up_to_radius = kdtree.search(atom.coord, radius, level="A")
+            selector.full_ids = set([atom.full_id for atom in atoms_up_to_radius])
+            io.save(f"{substructure_data_dir}/atoms_up_to_{radius}_angstroms.pdb", selector)
 
-            charge = None
-            while charge is None:
-                try:
-                    charge = calculate_charge_for_atom(kdtree, atom, radius)
-                except ValueError:
-                    radius += 0.5
-                    print(f"Convergence error. New radius is {radius}")
+            atoms_up_to_12A = kdtree.search(atom.coord, 12, level="A")
+            selector.full_ids = set([atom.full_id for atom in atoms_up_to_12A])
+            io.save(f"{substructure_data_dir}/atoms_up_to_12_angstroms.pdb", selector)
+
+            calculated_atoms = kdtree.search(atom.coord, 1.5, level="A") # ať se počítají jen centrální atom, dvouvazné kyslíky a vodíky
+            calculated_atoms_full_ids = set([calculated_atom.full_id[1:] for calculated_atom in calculated_atoms])
+
+            from rdkit import Chem
+            mol_6A = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_up_to_{radius}_angstroms.pdb", removeHs=False, sanitize=False)
+            mol_6A_conformer = mol_6A.GetConformer()
+            mol_12A = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_up_to_12_angstroms.pdb", removeHs=False, sanitize=False)
+            mol_12A_conformer = mol_12A.GetConformer()
+
+
+            mol_6A_coord_dict = {}
+            for aatom in mol_6A.GetAtoms():
+                position = mol_6A_conformer.GetAtomPosition(aatom.GetIdx())
+                mol_6A_coord_dict[(position.x, position.y, position.z)] = aatom
+            mol_12A_coord_dict = {}
+            for aatom in mol_12A.GetAtoms():
+                position = mol_12A_conformer.GetAtomPosition(aatom.GetIdx())
+                mol_12A_coord_dict[(position.x, position.y, position.z)] = aatom
+
+            atoms_with_broken_bonds = []
+            for aatom in mol_6A.GetAtoms():
+                position = mol_6A_conformer.GetAtomPosition(aatom.GetIdx())
+                mol_12A_atom = mol_12A_coord_dict[(position.x, position.y, position.z)]
+                if len(aatom.GetNeighbors()) != len(mol_12A_atom.GetNeighbors()):
+                    atoms_with_broken_bonds.append(mol_12A_atom)
+
+            carbons_with_broken_bonds_positions = []
+            while atoms_with_broken_bonds:
+                atom_with_broken_bonds = atoms_with_broken_bonds.pop(0)
+                bonded_atoms = atom_with_broken_bonds.GetNeighbors()
+                for ba in bonded_atoms:
+                    position = mol_12A_conformer.GetAtomPosition(ba.GetIdx())
+                    if (position.x, position.y, position.z) in mol_6A_coord_dict:
+                        continue
+                    else:
+                        if atom_with_broken_bonds.GetSymbol() == "C" and ba.GetSymbol() == "C":
+                            carbons_with_broken_bonds_positions.append(mol_12A_conformer.GetAtomPosition(atom_with_broken_bonds.GetIdx()))
+                            continue
+                        else:
+                            atoms_with_broken_bonds.append(ba)
+                            mol_6A_coord_dict[(position.x, position.y, position.z)] = ba
+
+
+            substructure_atoms = []
+            for atom in atoms_up_to_12A:
+                if tuple(round(float(x),3) for x in atom.coord) in mol_6A_coord_dict:
+                    substructure_atoms.append(atom)
+
+
+            selector.full_ids = set([atom.full_id for atom in substructure_atoms])
+            io.save(f"{substructure_data_dir}/substructure.pdb", selector)
+
+            substructure_charge = round(sum([aa.propka_charge for aa in substructure_atoms]))
+
+            system(
+             f"cd {substructure_data_dir} ; obabel -iPDB -oPDB substructure.pdb -h > reprotonated_substructure.pdb 2>/dev/null")
+            with open(f"{substructure_data_dir}/reprotonated_substructure.pdb") as reprotonated_substructure_file:
+                atom_lines = [line for line in reprotonated_substructure_file.readlines() if line[:4] in ["ATOM", "HETA"]]
+                original_atoms = atom_lines[:len(substructure_atoms)]
+                added_atoms = atom_lines[len(substructure_atoms):]
+
+
+            with open(f"{substructure_data_dir}/repaired_substructure.pdb", "w") as repaired_substructure_file:
+                repaired_substructure_file.write("".join(original_atoms))
+                for added_atom in added_atoms:
+
+                    if any([dist([float(added_atom[30:38]), float(added_atom[38:46]), float(added_atom[46:54])], (p.x, p.y, p.z)) < 1.3 for p in carbons_with_broken_bonds_positions]):
+                        repaired_substructure_file.write(added_atom)
 
 
 
-            charges.append(charge)
 
+            system(f"cd {substructure_data_dir} ; "
+                   f"xtb repaired_substructure.pdb --gfn 1 --gbsa water --acc 1000 --chrg {substructure_charge}   > xtb_output.txt 2> xtb_error_output.txt ")
+            xtb_output_file_lines = open(f"{substructure_data_dir}/xtb_output.txt").readlines()
+            charge_headline_index = xtb_output_file_lines.index(
+                "  Mulliken/CM5 charges         n(s)   n(p)   n(d)\n")
+            for substructure_index, substructure_atom in enumerate(PDB.PDBParser().get_structure("substructure",
+                                                                                 f"{substructure_data_dir}/substructure.pdb").get_atoms()):
+                if substructure_atom.full_id[1:] in calculated_atoms_full_ids: # todo, nejspíše přepisujeme přesněji vypočítané náboje za horši!
+                    charge = float(xtb_output_file_lines[charge_headline_index + substructure_index + 1].split()[3])
+                    structure[substructure_atom.full_id[2]][substructure_atom.get_parent().id][substructure_atom.id].cm5_charge = charge
 
             print(i, time() - t)
+            exit()
 
 
-        print(charges)
-
-
-        original_L8 = [-0.88739,
- 0.02735,
- 0.56648,
- -0.19884,
- -0.62598,
- -0.03123,
- -0.11887,
- -0.12838,
- -0.10039,
- -0.09775,
- -0.10829,
- 0.50145,
- 0.18461,
- 0.15126,
- 0.16411,
- 0.12613,
- 0.12519,
- 0.11908,
- 0.11837,
- 0.11969,
- 0.50981,
- 0.50711,
- -0.6881,
- 0.07473,
- 0.57103,
- -0.2016,
- -0.64419,
- -0.20678,
- -0.01142,
- -0.69831,
- -0.87198,
- -0.87446,
- 0.67678,
- 0.44874,
- 0.18196,
- 0.1337,
- 0.14928,
- 0.13643,
- 0.13499,
- 0.14931,
- 0.14951,
- 0.46918,
- 0.48105,
- 0.48807,
- 0.48439,
- 0.49046,
- -0.69192,
- -0.00225,
- 0.57051,
- -0.65382,
- 0.44561,
- 0.17781,
- 0.16978,
- -0.69434,
- 0.07817,
- 0.56923,
- -0.2136,
- -0.66368,
- -0.20916,
- -0.01119,
- -0.70093,
- -0.87185,
- -0.87317,
- 0.67641,
- 0.4472,
- 0.17107,
- 0.14669,
- 0.13798,
- 0.1389,
- 0.1391,
- 0.1518,
- 0.15127,
- 0.47138,
- 0.48078,
- 0.488,
- 0.48423,
- 0.4915,
- -0.67932,
- 0.09807,
- 0.56345,
- -0.25779,
- -0.66994,
- 0.63681,
- -0.76285,
- -0.76738,
- 0.44016,
- 0.16403,
- 0.13399,
- 0.14045,
- -0.68548,
- 0.08718,
- 0.57151,
- -0.31007,
- -0.6761,
- 0.43911,
- 0.16476,
- 0.14345,
- 0.13257,
- 0.13695,
- -0.68223,
- 0.08926,
- 0.56863,
- -0.30514,
- -0.67929,
- 0.44535,
- 0.15982,
- 0.13352,
- 0.14476,
- 0.1299,
- -0.68098,
- 0.08803,
- 0.56471,
- -0.30401,
- -0.6742,
- 0.44911,
- 0.1573,
- 0.13124,
- 0.13749,
- 0.13143,
- -0.69042,
- 0.07997,
- 0.569,
- -0.19945,
- -0.67655,
- -0.19592,
- -0.23031,
- -0.04388,
- -0.89564,
- 0.46033,
- 0.15873,
- 0.13859,
- 0.13422,
- 0.12989,
- 0.12844,
- 0.1408,
- 0.13747,
- 0.16526,
- 0.16629,
- 0.50013,
- 0.50653,
- 0.50297,
- -0.69645,
- 0.09245,
- 0.57755,
- -0.30256,
- -0.68039,
- 0.47832,
- 0.15918,
- 0.13,
- 0.14419,
- 0.12416,
- -0.69352,
- 0.06494,
- 0.5681,
- 0.08845,
- -0.67761,
- -0.81533,
- 0.47294,
- 0.16692,
- 0.1407,
- 0.12868,
- 0.53703,
- -0.68372,
- 0.00127,
- 0.56912,
- -0.66693,
- 0.46425,
- 0.16053,
- 0.16034,
- -0.6913,
- 0.08605,
- 0.56982,
- -0.2134,
- -0.68461,
- -0.09386,
- -0.31636,
- -0.32403,
- 0.46265,
- 0.15633,
- 0.13295,
- 0.12706,
- 0.11525,
- 0.10842,
- 0.11225,
- 0.11168,
- 0.10922,
- 0.11372,
- 0.10961,
- -0.69374,
- 0.07626,
- 0.57954,
- -0.09202,
- -0.69115,
- -0.32011,
- -0.31093,
- 0.47939,
- 0.16534,
- 0.12002,
- 0.11826,
- 0.11982,
- 0.12035,
- 0.11013,
- 0.12372,
- 0.11671,
- -0.68853,
- 0.00782,
- 0.57024,
- -0.67661,
- 0.46768,
- 0.15922,
- 0.16445,
- -0.67929,
- 0.08692,
- 0.56674,
- -0.20962,
- -0.67917,
- -0.09282,
- -0.31342,
- -0.32691,
- 0.45096,
- 0.15553,
- 0.13685,
- 0.12641,
- 0.11697,
- 0.10729,
- 0.11107,
- 0.11076,
- 0.1067,
- 0.1144,
- 0.11007,
- -0.7034,
- 0.05845,
- 0.56774,
- 0.17494,
- -0.68593,
- -0.3215,
- -0.78067,
- 0.48227,
- 0.16184,
- 0.11646,
- 0.52942,
- 0.12055,
- 0.12712,
- 0.11421,
- -0.69503,
- 0.10351,
- 0.58154,
- -0.25143,
- -0.68584,
- 0.63235,
- -0.77068,
- -0.77157,
- 0.48126,
- 0.1614,
- 0.13978,
- 0.12876,
- -0.69252,
- 0.08967,
- 0.57286,
- -0.19849,
- -0.67795,
- -0.20624,
- 0.00028,
- -0.68234,
- -0.87222,
- -0.87494,
- 0.67943,
- 0.47202,
- 0.15118,
- 0.14179,
- 0.13583,
- 0.12651,
- 0.12816,
- 0.15237,
- 0.14559,
- 0.45336,
- 0.47515,
- 0.4857,
- 0.48229,
- 0.48608,
- -0.69412,
- 0.08181,
- 0.56582,
- -0.19653,
- -0.66376,
- -0.20898,
- -0.01069,
- -0.69189,
- -0.87377,
- -0.87348,
- 0.67733,
- 0.46808,
- 0.15095,
- 0.14026,
- 0.13565,
- 0.13322,
- 0.13407,
- 0.15028,
- 0.1493,
- 0.46237,
- 0.47873,
- 0.48984,
- 0.48545,
- 0.49026,
- -0.67873,
- 0.00071,
- 0.57089,
- -0.67452,
- 0.46155,
- 0.15474,
- 0.15545,
- -0.69406,
- 0.08774,
- 0.56573,
- -0.11107,
- -0.66076,
- -0.08861,
- 0.48508,
- 0.15371,
- 0.14258,
- 0.13797,
- -0.70459,
- 0.09047,
- 0.5668,
- -0.11437,
- -0.66296,
- -0.07858,
- 0.47469,
- 0.15208,
- 0.13775,
- 0.13267,
- -0.68657,
- 0.06721,
- 0.56096,
- 0.08677,
- -0.66824,
- -0.79328,
- 0.4469,
- 0.16696,
- 0.12802,
- 0.12724,
- 0.52249,
- -0.65772,
- 0.09587,
- 0.56229,
- -0.1849,
- -0.66202,
- 0.14242,
- 0.05426,
- -0.62664,
- 0.30261,
- -0.61539,
- 0.45064,
- 0.15701,
- 0.14631,
- 0.13415,
- 0.47316,
- 0.11,
- 0.12883,
- -0.53584,
- 0.07602,
- 0.57363,
- -0.20056,
- -0.65833,
- -0.20852,
- -0.00504,
- 0.1598,
- 0.1376,
- 0.13757,
- 0.13192,
- 0.1406,
- 0.14098,
- 0.14416,
- -0.68499,
- 0.0853,
- 0.5725,
- -0.316,
- -0.65662,
- 0.43873,
- 0.16296,
- 0.14357,
- 0.13246,
- 0.13962,
- -0.68284,
- 0.08371,
- 0.57049,
- -0.11955,
- -0.67456,
- -0.0884,
- 0.44094,
- 0.16376,
- 0.14891,
- 0.14227,
- -0.68622,
- 0.10437,
- 0.56238,
- -0.22205,
- -0.65874,
- 0.58655,
- -0.88884,
- -0.66437,
- 0.46909,
- 0.15482,
- 0.16608,
- 0.14463,
- 0.44548,
- 0.48164,
- -0.68783,
- 0.07713,
- 0.56352,
- -0.09095,
- -0.66921,
- -0.31705,
- -0.31348,
- 0.44189,
- 0.15517,
- 0.12008,
- 0.11851,
- 0.1205,
- 0.11499,
- 0.12429,
- 0.11614,
- 0.11494,
- -0.6898,
- 0.09743,
- 0.5649,
- -0.24844,
- -0.66105,
- 0.63184,
- -0.77045,
- -0.77095,
- 0.44011,
- 0.15686,
- 0.14513,
- 0.11905,
- -0.6855,
- 0.1021,
- 0.55539,
- -0.17422,
- -0.67896,
- 0.18001,
- 0.07355,
- -0.56831,
- 0.33195,
- -0.56918,
- 0.44419,
- 0.1717,
- 0.15017,
- 0.14987,
- 0.5098,
- 0.15691,
- 0.1971,
- 0.5249,
- -0.51299,
- 0.08132,
- 0.56353,
- -0.19784,
- -0.67616,
- -0.20603,
- 0.01133,
- 0.15804,
- 0.13237,
- 0.13242,
- 0.1298,
- 0.1326,
- 0.14388,
- 0.13314,
- -0.69887,
- 0.08534,
- 0.56576,
- -0.1926,
- -0.66785,
- -0.26359,
- 0.63071,
- -0.75735,
- -0.76566,
- 0.47118,
- 0.15693,
- 0.12738,
- 0.13545,
- 0.12212,
- 0.13416,
- -0.69115,
- 0.07802,
- 0.56274,
- -0.10027,
- -0.6737,
- -0.202,
- -0.31345,
- -0.3125,
- 0.43398,
- 0.16374,
- 0.11769,
- 0.11148,
- 0.11263,
- 0.12037,
- 0.11791,
- 0.1169,
- 0.11583,
- 0.11693,
- 0.10253,
- -0.68419,
- 0.0811,
- 0.55906,
- -0.10688,
- -0.66973,
- -0.08641,
- 0.44069,
- 0.15104,
- 0.13699,
- 0.14046,
- -0.65959,
- -0.01186,
- 0.63856,
- -0.76685,
- -0.76467,
- 0.41963,
- 0.12193,
- 0.11596]
-
-
-        original_107d_prepared = [-0.7927,
- 0.11317,
- 0.16181,
- -0.55204,
- 0.20016,
- -0.45825,
- -0.20183,
- 0.35724,
- -0.43728,
- 0.73848,
- -0.67048,
- -0.6357,
- 0.48445,
- -0.79532,
- -0.11357,
- 0.17044,
- 0.12022,
- 0.12995,
- 0.15264,
- 0.17799,
- 0.17092,
- 0.16606,
- 0.52685,
- 0.48023,
- 0.14169,
- 0.16785,
- 0.16138,
- 0.56678,
- 0.54609,
- -0.55161,
- -0.55071,
- -0.46461,
- 0.11817,
- 0.15259,
- -0.55366,
- 0.19966,
- -0.45682,
- -0.19006,
- 0.35413,
- -0.4275,
- 0.7322,
- -0.66038,
- -0.64465,
- 0.47809,
- -0.8119,
- -0.11565,
- 0.17746,
- 0.13071,
- 0.1205,
- 0.14438,
- 0.1852,
- 0.17256,
- 0.15482,
- 0.51823,
- 0.46947,
- 0.14012,
- 0.13905,
- 0.15782,
- 0.54482,
- -0.55203,
- -0.567,
- -0.44897,
- 0.12673,
- 0.16158,
- -0.53915,
- 0.19422,
- -0.47731,
- -0.21733,
- 0.35839,
- -0.4551,
- 0.72907,
- -0.61104,
- -0.62327,
- 0.57585,
- -0.63876,
- -0.04836,
- -0.22946,
- 0.14347,
- 0.13785,
- 0.12001,
- 0.14318,
- 0.17563,
- 0.17,
- 0.13205,
- 0.13022,
- 0.12682,
- 0.44711,
- 0.12672,
- 0.14944,
- 0.18276,
- 0.54765,
- -0.5605,
- -0.58756,
- -0.45637,
- 0.12036,
- 0.1575,
- -0.54238,
- 0.19946,
- -0.47051,
- -0.20185,
- 0.35404,
- -0.43755,
- 0.72886,
- -0.63619,
- -0.65478,
- 0.57146,
- -0.62335,
- -0.04883,
- -0.22721,
- 0.1486,
- 0.13043,
- 0.12386,
- 0.13618,
- 0.17939,
- 0.19022,
- 0.13825,
- 0.12686,
- 0.12202,
- 0.48379,
- 0.14306,
- 0.14492,
- 0.16801,
- 0.54572,
- -0.56007,
- -0.56932,
- -0.48118,
- 0.1128,
- 0.15466,
- -0.56483,
- 0.19337,
- -0.48053,
- -0.21425,
- 0.34951,
- -0.4558,
- 0.72666,
- -0.63883,
- -0.66392,
- 0.57405,
- -0.62905,
- -0.0602,
- -0.22718,
- 0.14539,
- 0.13516,
- 0.12328,
- 0.11964,
- 0.16606,
- 0.1733,
- 0.1301,
- 0.12683,
- 0.12515,
- 0.48834,
- 0.14358,
- 0.14671,
- 0.15973,
- 0.54108,
- -0.56945,
- -0.56845,
- -0.46856,
- 0.12629,
- 0.15483,
- -0.56325,
- 0.19467,
- -0.46978,
- -0.2184,
- 0.34833,
- -0.45151,
- 0.72711,
- -0.62179,
- -0.6399,
- 0.56963,
- -0.62579,
- -0.06872,
- -0.23313,
- 0.1482,
- 0.12034,
- 0.12604,
- 0.11227,
- 0.16067,
- 0.16841,
- 0.13548,
- 0.12859,
- 0.11781,
- 0.47256,
- 0.13455,
- 0.15223,
- 0.16608,
- 0.54765,
- -0.56991,
- -0.57036,
- -0.48547,
- 0.12205,
- 0.15902,
- -0.55515,
- 0.18749,
- -0.79952,
- -0.19387,
- 0.35005,
- -0.41765,
- 0.73768,
- -0.66089,
- -0.63279,
- 0.47704,
- -0.79021,
- -0.11392,
- 0.16028,
- 0.12113,
- 0.1226,
- 0.13738,
- 0.19055,
- 0.17216,
- 0.16522,
- 0.51184,
- 0.47935,
- 0.13123,
- 0.16219,
- 0.17215,
- 0.57471,
- -0.82493,
- 0.10772,
- 0.15354,
- -0.57194,
- 0.19222,
- -0.47119,
- -0.21757,
- 0.36236,
- -0.42571,
- 0.38612,
- -0.48444,
- 0.15653,
- 0.58503,
- -0.60662,
- -0.65843,
- 0.64939,
- -0.77852,
- -0.53312,
- 0.42318,
- 0.09926,
- 0.12041,
- 0.13747,
- 0.15889,
- 0.17454,
- 0.52198,
- 0.52172,
- 0.49107,
- 0.13169,
- 0.154,
- 0.16148,
- 0.56838,
- 0.54392,
- -0.57324,
- -0.57488,
- -0.47427,
- 0.11649,
- 0.16503,
- -0.54915,
- 0.19623,
- -0.45775,
- -0.20769,
- 0.35957,
- -0.43411,
- 0.38409,
- -0.53408,
- 0.15379,
- 0.45423,
- -0.77163,
- -0.59248,
- 0.40717,
- -0.51722,
- 0.41026,
- 0.12786,
- 0.12681,
- 0.1453,
- 0.16627,
- 0.17453,
- 0.50984,
- 0.48213,
- 0.16378,
- 0.13275,
- 0.15577,
- 0.16649,
- 0.54457,
- -0.5655,
- -0.5675,
- -0.47858,
- 0.11961,
- 0.1605,
- -0.55279,
- 0.19835,
- -0.46986,
- -0.2042,
- 0.36329,
- -0.4445,
- 0.36359,
- -0.52521,
- 0.14678,
- 0.46642,
- -0.75685,
- -0.60669,
- 0.40747,
- -0.55244,
- 0.41613,
- 0.13308,
- 0.13202,
- 0.15458,
- 0.16192,
- 0.16731,
- 0.49599,
- 0.47877,
- 0.15822,
- 0.13782,
- 0.16503,
- 0.16619,
- 0.54494,
- -0.58039,
- -0.556,
- -0.45498,
- 0.11886,
- 0.15649,
- -0.56707,
- 0.19506,
- -0.47505,
- -0.20663,
- 0.35034,
- -0.43203,
- 0.38434,
- -0.53478,
- 0.15232,
- 0.46533,
- -0.76872,
- -0.6047,
- 0.39078,
- -0.5363,
- 0.40274,
- 0.13413,
- 0.12287,
- 0.11101,
- 0.14838,
- 0.177,
- 0.49772,
- 0.47768,
- 0.17276,
- 0.14572,
- 0.14797,
- 0.15433,
- 0.54438,
- -0.56544,
- -0.56696,
- -0.47876,
- 0.11596,
- 0.15527,
- -0.57616,
- 0.19782,
- -0.48075,
- -0.20539,
- 0.35255,
- -0.44397,
- 0.36959,
- -0.53212,
- 0.16962,
- 0.47583,
- -0.80694,
- -0.56724,
- 0.37737,
- -0.43692,
- 0.36281,
- 0.11907,
- 0.13333,
- 0.14236,
- 0.14634,
- 0.16201,
- 0.50511,
- 0.47517,
- 0.19137,
- 0.14501,
- 0.16058,
- 0.16225,
- 0.54384,
- -0.56838,
- -0.55701,
- -0.46101,
- 0.11645,
- 0.15292,
- -0.56315,
- 0.18808,
- -0.46436,
- -0.21001,
- 0.35981,
- -0.43305,
- 0.37952,
- -0.50195,
- 0.13205,
- 0.57011,
- -0.62471,
- -0.67745,
- 0.64334,
- -0.76182,
- -0.53577,
- 0.4051,
- 0.12592,
- 0.11878,
- 0.1554,
- 0.16185,
- 0.18776,
- 0.51495,
- 0.5206,
- 0.48023,
- 0.13692,
- 0.14647,
- 0.15617,
- 0.54255,
- -0.56732,
- -0.5619,
- -0.48766,
- 0.11059,
- 0.151,
- -0.57034,
- 0.16969,
- -0.78675,
- -0.23531,
- 0.36455,
- -0.43642,
- 0.3699,
- -0.48988,
- 0.14813,
- 0.58732,
- -0.61337,
- -0.65922,
- 0.65067,
- -0.77102,
- -0.53385,
- 0.41651,
- 0.12489,
- 0.11073,
- 0.13954,
- 0.16295,
- 0.17049,
- 0.5245,
- 0.52146,
- 0.49713,
- 0.12182,
- 0.16051,
- 0.16484,
- 0.54091,
- -0.5164,
- 0.14644,
- 0.43483,
- -0.04193,
- 0.2138,
- 0.32614,
- -0.07231,
- 0.23509,
- 0.04816,
- 0.03102,
- -0.07781,
- 0.01986,
- -0.39868,
- 0.57239,
- 0.17857,
- -0.03321,
- -0.0166,
- -0.04565,
- 0.27948,
- 0.25144,
- 0.28873,
- 0.16526,
- -0.54258,
- -0.4736,
- 0.03122,
- -0.51589,
- 0.038,
- -0.50731,
- 0.04088,
- -0.54405,
- -0.69912,
- -0.54541,
- -0.21731,
- 0.65693,
- -0.54074,
- -0.51918,
- 0.04171,
- 0.51882,
- 0.19307,
- 0.1659,
- 0.16614,
- 0.19989,
- 0.14681,
- 0.17846,
- 0.1568,
- 0.16694,
- 0.53116,
- 0.13735,
- 0.13423,
- 0.12303,
- 0.10917,
- 0.12818,
- 0.10823,
- 0.10692,
- 0.1328,
- 0.11856,
- 0.60141,
- 0.14113,
- 0.1382,
- 0.14436,
- 0.11788,
- 0.13602,
- 0.1158]
-
-        original = original_L8
-
-        from bokeh.plotting import figure, show
-        f = figure()
-        f.circle(original, charges, radius=0.01)
-        show(f)
-        import numpy as np
-        charges = np.array(charges)
-        original = np.array(original)
-
-        print(np.sqrt(np.mean((charges-original) ** 2)))
-        from scipy.stats import pearsonr
-        print(pearsonr(charges, original).statistic)
+        charges = np.array([atom.cm5_charge for atom in structure.get_atoms()])
         open(f"{self.data_dir}/charges.txt", "w").write(" ".join([str(x) for x in charges]))
 
 
-        from collections import defaultdict
-        rpchgdd = defaultdict(list)
-        rxchgdd = defaultdict(list)
-        rrxchgdd = defaultdict(list)
-        for atom, pchg, xchg, rxchg in zip(structure.get_atoms(), propka_charges_L8, original, charges):
-            rpchgdd[atom.full_id[3][1]].append(pchg)
-            rxchgdd[atom.full_id[3][1]].append(xchg)
-            rrxchgdd[atom.full_id[3][1]].append(rxchg)
-
-        rpchg = []
-        xpchg = []
-        rrxchg = []
-        for x in range(1,38):
-            print(x, sum(rxchgdd[x]))
-            rpchg.append(sum(rpchgdd[x]))
-            xpchg.append(sum(rxchgdd[x]))
-            rrxchg.append(sum(rrxchgdd[x]))
-
-
-        ff = figure()
-        ff.circle(rpchg, xpchg, radius=0.01)
-        show(ff)
-
-        fff = figure()
-        fff.circle(rrxchg, xpchg, radius=0.01)
-        show(fff)
-
-
+        input_file = f"{self.data_dir}/protonated_protein.cif"
+        structure = gemmi.cif.read_file(input_file)
+        block = structure.sole_block()
+        block.find_mmcif_category('_chem_comp.').erase() # remove pesky _chem_comp category >:(
+        sb_ncbr_partial_atomic_charges_meta_prefix = "_sb_ncbr_partial_atomic_charges_meta."
+        sb_ncbr_partial_atomic_charges_meta_attributes = ["id",
+                                                  "type",
+                                                  "method"]
+        metadata_loop = block.init_loop(sb_ncbr_partial_atomic_charges_meta_prefix,
+                                        sb_ncbr_partial_atomic_charges_meta_attributes)
+        metadata_loop.add_row(['1',
+                               "'empirical'",
+                               "'SQE+qp/Schindler 2021 (PUB_pept)'"])
+        sb_ncbr_partial_atomic_charges_prefix = "_sb_ncbr_partial_atomic_charges."
+        sb_ncbr_partial_atomic_charges_attributes = ["type_id",
+                                             "atom_id",
+                                             "charge"]
+        charges_loop = block.init_loop(sb_ncbr_partial_atomic_charges_prefix,
+                                       sb_ncbr_partial_atomic_charges_attributes)
+        for atomId, charge in enumerate(charges):
+            charges_loop.add_row(["1",
+                                  f"{atomId + 1}",
+                                  f"{charge: .4f}"])
+        block.write_file(f"{self.data_dir}/final.cif")
 
 
 
 
 
     def fix_structure(self):
+        """
+        mmCIF file is fixed by tool PDBFixer.
+        https://github.com/openmm/pdbfixer
+
+        PDBFixer solves common problems in protein structure files.
+        It selects the first model, alternative locations, fills in missing heavy atoms, etc.
+
+        PDBFixer removes values from a struct_conn block
+        and therefore only atom_site block is overwritten from PDBFixer to self.biotite_mmCIF_file.
+        """
+
         print("Fixing structure by PDBFixer... ", end="")
         fixer = PDBFixer(filename=self.mmCIF_file)
+
+        # download templates for heteroresidues
+        with open(f"{self.data_dir}/logs/pdbfixer_downloading_templates.txt", "w") as pdbfixer_log:
+            fixer_available_resnames = set(fixer.templates.keys())
+            for resname in self.set_of_resnames:
+                if resname not in fixer_available_resnames:
+                    try:
+                        fixer.downloadTemplate(resname)
+                        pdbfixer_log.write(f"Template for {resname} downloaded successfully.\n")
+                    except:
+                        pdbfixer_log.write(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
+                        exit(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
+
+        # add heavy atoms
         fixer.missingResidues = {}
         fixer.findMissingAtoms()
+        with open(f"{self.data_dir}/logs/added_heavy_atoms.txt", "w") as added_heavy_atoms_file: # log it
+            for residue, residue_list in fixer.missingAtoms.items():
+                for atom in residue_list:
+                    added_heavy_atoms_file.write(f"{residue} {atom}\n")
         fixer.addMissingAtoms()
-        PDBxFile.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/fixed.cif", 'w'),keepIds=True) # todo zjistit co dělá keepIds
+
+        # write fixed structure to file
+        PDBxFile.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/fixed.cif", 'w'), keepIds=True)
+
+        # write only atom_site block to self.biotite_mmCIF_file
         fixed_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/fixed.cif")
         self.biotite_mmCIF_file.block["atom_site"] = fixed_mmCIF_file.block["atom_site"]
         self.biotite_mmCIF_file.write(f"{self.data_dir}/fixed.cif")
-        # todo udělat issue
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
         mmcif_string = open(f"{self.data_dir}/fixed.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/fixed.cif", "w").write(repaired_mmcif_string)
         print("ok")
 
+    def remove_hydrogens(self):
+        biotite_protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file, model=1,extra_fields=["b_factor", "occupancy"])
+        biotite_protein_without_hydrogens = biotite_protein[biotite_protein.element != "H"]
+        biotite_mmCIF_file_without_hydrogens = biotite_mmCIF.CIFFile()
+        biotite_mmCIF.set_structure(biotite_mmCIF_file_without_hydrogens, biotite_protein_without_hydrogens)
+        self.biotite_mmCIF_file.block["atom_site"] = biotite_mmCIF_file_without_hydrogens.block["atom_site"]
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/without_hydrogens.cif")
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
+        mmcif_string = open(f"{self.data_dir}/without_hydrogens.cif").read()
+        repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        open(f"{self.data_dir}/without_hydrogens.cif", "w").write(repaired_mmcif_string)
 
 
-
-    def protonate_ligands(self):
+    def protonate_heteroresidues(self):
         """
-        všechny vodíky jsou odstraněny
+        This function is based on the biotite, hydride, RDKit and dimorphite_dl libraries.
+        https://github.com/biotite-dev/biotite
+        https://github.com/biotite-dev/hydride
+        https://github.com/rdkit/rdkit
+        https://github.com/durrantlab/dimorphite_dl
 
-
-        Ligands are compared with their eqvivalents in the CCD dictionary.
-        If the element counts are identical, the ligand is left unchanged.
-        If the number of heavy atoms is the same but the number of hydrogens is different,
-            the formal charges from the CCD dictionary are read and the ligand is protonated.
-        If the number of heavy atoms is different, the ligand is protonated with the hydride tool
-            without loading the formal charges from the CCD dictionary.
-        Ligands are protonated by the hydride tool (https://hydride.biotite-python.org/api.html).
-        CCD dictionary is downloaded from http://ligand-expo.rcsb.org/ld-download.html.
-        Waters are in this function ignored.
+        The heteroresidues are protonated by the hydride library, which is built on top of the biotite library.
+        Prior to the actual protonation, the formal charges are determined using the dimorphite_dl and RDKit libraries.
+        Usually, from the mmCIF file, the ligand without hydrogens cannot be correctly constructed
+        because of the order of bonding between the individual atoms.
+        Therefore, the structure from the CCD dictionary is used as template.
         """
-        # todo co tady s tím vlastně děláme
+
         print("Adding hydrogens to heteroresidues... ", end="")
-        # biotite_mmCIF_file = biotite_mmCIF.CIFFile.read(self.mmCIF_file)
-        # biotite_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/fixed.cif")
+        # pdb2pqr is part of moleculekit
+        residues_protonated_by_pdb2pqr = set(['004', '03Y', '0A1', '0AF', '0BN', '1MH', '2AS', '2GX', '2ML', '2MR', '4IN', '4PH', '4PQ', '5JP', 'AA4', 'ABA', 'AHP', 'ALA', 'ALC', 'ALN', 'ALY', 'APD', 'ARG', 'ASN', 'ASP', 'BB8', 'BCS', 'BTK', 'CCS', 'CGU', 'CSA', 'CSO', 'CSP', 'CSS', 'CYS', 'D4P', 'DA2', 'DAB', 'DAH', 'DPP', 'ESC', 'FGL', 'GHG', 'GLN', 'GLU', 'GLY', 'GME', 'GNC', 'HHK', 'HIS', 'HLU', 'HLX', 'HOX', 'HPE', 'HQA', 'HTR', 'HYP', 'I2M', 'IGL', 'IIL', 'ILE', 'IML', 'KYN', 'LEU', 'LME', 'LMQ', 'LYS', 'LYZ', 'M3L', 'ME0', 'MEA', 'MEN', 'MEQ', 'MET', 'MLE', 'MLY', 'MLZ', 'MME', 'MMO', 'MVA', 'NAL', 'NCY', 'NLE', 'NVA', 'NZC', 'OCY', 'OMX', 'ONL', 'ORM', 'P1L', 'PCA', 'PHE', 'PRK', 'PRO', 'PTR', 'SEP', 'SER', 'THR', 'TPO', 'TRO', 'TRP', 'TY2', 'TYQ', 'TYR', 'VAL', 'WAT', 'YCM', 'YNM', 'RA', 'RC', 'RG', 'DT', 'RU', 'ASH', 'CYM', 'CYX', 'GLH', 'HSE', 'HSD', 'HSP', 'HID', 'HIE', 'HIP', 'AR0', 'LYN', 'TYM', 'C004', 'C03Y', 'C0A1', 'C0AF', 'C0BN', 'C1MH', 'C2AS', 'C2GX', 'C2ML', 'C2MR', 'C4IN', 'C4PH', 'C4PQ', 'C5JP', 'CAA4', 'CABA', 'CAHP', 'CALA', 'CALC', 'CALN', 'CALY', 'CAPD', 'CARG', 'CASN', 'CASP', 'CBB8', 'CBCS', 'CBTK', 'CCCS', 'CCGU', 'CCSA', 'CCSO', 'CCSP', 'CCSS', 'CCYS', 'CD4P', 'CDA2', 'CDAB', 'CDAH', 'CDPP', 'CESC', 'CFGL', 'CGHG', 'CGLN', 'CGLU', 'CGLY', 'CGME', 'CGNC', 'CHHK', 'CHIS', 'CHLU', 'CHLX', 'CHOX', 'CHPE', 'CHQA', 'CHTR', 'CHYP', 'CI2M', 'CIGL', 'CIIL', 'CILE', 'CIML', 'CKYN', 'CLEU', 'CLME', 'CLMQ', 'CLYS', 'CLYZ', 'CM3L', 'CME0', 'CMEA', 'CMEN', 'CMEQ', 'CMET', 'CMLE', 'CMLY', 'CMLZ', 'CMME', 'CMMO', 'CMVA', 'CNAL', 'CNCY', 'CNLE', 'CNVA', 'CNZC', 'COCY', 'COMX', 'CONL', 'CORM', 'CP1L', 'CPCA', 'CPHE', 'CPRK', 'CPRO', 'CPTR', 'CSEP', 'CSER', 'CTHR', 'CTPO', 'CTRO', 'CTRP', 'CTY2', 'CTYQ', 'CTYR', 'CVAL', 'CWAT', 'CYCM', 'CYNM', 'CASH', 'CCYM', 'CCYX', 'CGLH', 'CHSE', 'CHSD', 'CHSP', 'CHID', 'CHIE', 'CHIP', 'CAR0', 'CLYN', 'CTYM', 'NEUTRAL-C004', 'NEUTRAL-C03Y', 'NEUTRAL-C0A1', 'NEUTRAL-C0AF', 'NEUTRAL-C0BN', 'NEUTRAL-C1MH', 'NEUTRAL-C2AS', 'NEUTRAL-C2GX', 'NEUTRAL-C2ML', 'NEUTRAL-C2MR', 'NEUTRAL-C4IN', 'NEUTRAL-C4PH', 'NEUTRAL-C4PQ', 'NEUTRAL-C5JP', 'NEUTRAL-CAA4', 'NEUTRAL-CABA', 'NEUTRAL-CAHP', 'NEUTRAL-CALA', 'NEUTRAL-CALC', 'NEUTRAL-CALN', 'NEUTRAL-CALY', 'NEUTRAL-CAPD', 'NEUTRAL-CARG', 'NEUTRAL-CASN', 'NEUTRAL-CASP', 'NEUTRAL-CBB8', 'NEUTRAL-CBCS', 'NEUTRAL-CBTK', 'NEUTRAL-CCCS', 'NEUTRAL-CCGU', 'NEUTRAL-CCSA', 'NEUTRAL-CCSO', 'NEUTRAL-CCSP', 'NEUTRAL-CCSS', 'NEUTRAL-CCYS', 'NEUTRAL-CD4P', 'NEUTRAL-CDA2', 'NEUTRAL-CDAB', 'NEUTRAL-CDAH', 'NEUTRAL-CDPP', 'NEUTRAL-CESC', 'NEUTRAL-CFGL', 'NEUTRAL-CGHG', 'NEUTRAL-CGLN', 'NEUTRAL-CGLU', 'NEUTRAL-CGLY', 'NEUTRAL-CGME', 'NEUTRAL-CGNC', 'NEUTRAL-CHHK', 'NEUTRAL-CHIS', 'NEUTRAL-CHLU', 'NEUTRAL-CHLX', 'NEUTRAL-CHOX', 'NEUTRAL-CHPE', 'NEUTRAL-CHQA', 'NEUTRAL-CHTR', 'NEUTRAL-CHYP', 'NEUTRAL-CI2M', 'NEUTRAL-CIGL', 'NEUTRAL-CIIL', 'NEUTRAL-CILE', 'NEUTRAL-CIML', 'NEUTRAL-CKYN', 'NEUTRAL-CLEU', 'NEUTRAL-CLME', 'NEUTRAL-CLMQ', 'NEUTRAL-CLYS', 'NEUTRAL-CLYZ', 'NEUTRAL-CM3L', 'NEUTRAL-CME0', 'NEUTRAL-CMEA', 'NEUTRAL-CMEN', 'NEUTRAL-CMEQ', 'NEUTRAL-CMET', 'NEUTRAL-CMLE', 'NEUTRAL-CMLY', 'NEUTRAL-CMLZ', 'NEUTRAL-CMME', 'NEUTRAL-CMMO', 'NEUTRAL-CMVA', 'NEUTRAL-CNAL', 'NEUTRAL-CNCY', 'NEUTRAL-CNLE', 'NEUTRAL-CNVA', 'NEUTRAL-CNZC', 'NEUTRAL-COCY', 'NEUTRAL-COMX', 'NEUTRAL-CONL', 'NEUTRAL-CORM', 'NEUTRAL-CP1L', 'NEUTRAL-CPCA', 'NEUTRAL-CPHE', 'NEUTRAL-CPRK', 'NEUTRAL-CPRO', 'NEUTRAL-CPTR', 'NEUTRAL-CSEP', 'NEUTRAL-CSER', 'NEUTRAL-CTHR', 'NEUTRAL-CTPO', 'NEUTRAL-CTRO', 'NEUTRAL-CTRP', 'NEUTRAL-CTY2', 'NEUTRAL-CTYQ', 'NEUTRAL-CTYR', 'NEUTRAL-CVAL', 'NEUTRAL-CWAT', 'NEUTRAL-CYCM', 'NEUTRAL-CYNM', 'NEUTRAL-CASH', 'NEUTRAL-CCYM', 'NEUTRAL-CCYX', 'NEUTRAL-CGLH', 'NEUTRAL-CHSE', 'NEUTRAL-CHSD', 'NEUTRAL-CHSP', 'NEUTRAL-CHID', 'NEUTRAL-CHIE', 'NEUTRAL-CHIP', 'NEUTRAL-CAR0', 'NEUTRAL-CLYN', 'NEUTRAL-CTYM', 'N004', 'N03Y', 'N0A1', 'N0AF', 'N0BN', 'N1MH', 'N2AS', 'N2GX', 'N2ML', 'N2MR', 'N4IN', 'N4PH', 'N4PQ', 'N5JP', 'NAA4', 'NABA', 'NAHP', 'NALA', 'NALC', 'NALN', 'NALY', 'NAPD', 'NARG', 'NASN', 'NASP', 'NBB8', 'NBCS', 'NBTK', 'NCCS', 'NCGU', 'NCSA', 'NCSO', 'NCSP', 'NCSS', 'NCYS', 'ND4P', 'NDA2', 'NDAB', 'NDAH', 'NDPP', 'NESC', 'NFGL', 'NGHG', 'NGLN', 'NGLU', 'NGLY', 'NGME', 'NGNC', 'NHHK', 'NHIS', 'NHLU', 'NHLX', 'NHOX', 'NHPE', 'NHQA', 'NHTR', 'NHYP', 'NI2M', 'NIGL', 'NIIL', 'NILE', 'NIML', 'NKYN', 'NLEU', 'NLME', 'NLMQ', 'NLYS', 'NLYZ', 'NM3L', 'NME0', 'NMEA', 'NMEN', 'NMEQ', 'NMET', 'NMLE', 'NMLY', 'NMLZ', 'NMME', 'NMMO', 'NMVA', 'NNAL', 'NNCY', 'NNLE', 'NNVA', 'NNZC', 'NOCY', 'NOMX', 'NONL', 'NORM', 'NP1L', 'NPCA', 'NPHE', 'NPRK', 'NPRO', 'NPTR', 'NSEP', 'NSER', 'NTHR', 'NTPO', 'NTRO', 'NTRP', 'NTY2', 'NTYQ', 'NTYR', 'NVAL', 'NWAT', 'NYCM', 'NYNM', 'NASH', 'NCYM', 'NCYX', 'NGLH', 'NHSE', 'NHSD', 'NHSP', 'NHID', 'NHIE', 'NHIP', 'NAR0', 'NLYN', 'NTYM', 'NEUTRAL-N004', 'NEUTRAL-N03Y', 'NEUTRAL-N0A1', 'NEUTRAL-N0AF', 'NEUTRAL-N0BN', 'NEUTRAL-N1MH', 'NEUTRAL-N2AS', 'NEUTRAL-N2GX', 'NEUTRAL-N2ML', 'NEUTRAL-N2MR', 'NEUTRAL-N4IN', 'NEUTRAL-N4PH', 'NEUTRAL-N4PQ', 'NEUTRAL-N5JP', 'NEUTRAL-NAA4', 'NEUTRAL-NABA', 'NEUTRAL-NAHP', 'NEUTRAL-NALA', 'NEUTRAL-NALC', 'NEUTRAL-NALN', 'NEUTRAL-NALY', 'NEUTRAL-NAPD', 'NEUTRAL-NARG', 'NEUTRAL-NASN', 'NEUTRAL-NASP', 'NEUTRAL-NBB8', 'NEUTRAL-NBCS', 'NEUTRAL-NBTK', 'NEUTRAL-NCCS', 'NEUTRAL-NCGU', 'NEUTRAL-NCSA', 'NEUTRAL-NCSO', 'NEUTRAL-NCSP', 'NEUTRAL-NCSS', 'NEUTRAL-NCYS', 'NEUTRAL-ND4P', 'NEUTRAL-NDA2', 'NEUTRAL-NDAB', 'NEUTRAL-NDAH', 'NEUTRAL-NDPP', 'NEUTRAL-NESC', 'NEUTRAL-NFGL', 'NEUTRAL-NGHG', 'NEUTRAL-NGLN', 'NEUTRAL-NGLU', 'NEUTRAL-NGLY', 'NEUTRAL-NGME', 'NEUTRAL-NGNC', 'NEUTRAL-NHHK', 'NEUTRAL-NHIS', 'NEUTRAL-NHLU', 'NEUTRAL-NHLX', 'NEUTRAL-NHOX', 'NEUTRAL-NHPE', 'NEUTRAL-NHQA', 'NEUTRAL-NHTR', 'NEUTRAL-NHYP', 'NEUTRAL-NI2M', 'NEUTRAL-NIGL', 'NEUTRAL-NIIL', 'NEUTRAL-NILE', 'NEUTRAL-NIML', 'NEUTRAL-NKYN', 'NEUTRAL-NLEU', 'NEUTRAL-NLME', 'NEUTRAL-NLMQ', 'NEUTRAL-NLYS', 'NEUTRAL-NLYZ', 'NEUTRAL-NM3L', 'NEUTRAL-NME0', 'NEUTRAL-NMEA', 'NEUTRAL-NMEN', 'NEUTRAL-NMEQ', 'NEUTRAL-NMET', 'NEUTRAL-NMLE', 'NEUTRAL-NMLY', 'NEUTRAL-NMLZ', 'NEUTRAL-NMME', 'NEUTRAL-NMMO', 'NEUTRAL-NMVA', 'NEUTRAL-NNAL', 'NEUTRAL-NNCY', 'NEUTRAL-NNLE', 'NEUTRAL-NNVA', 'NEUTRAL-NNZC', 'NEUTRAL-NOCY', 'NEUTRAL-NOMX', 'NEUTRAL-NONL', 'NEUTRAL-NORM', 'NEUTRAL-NP1L', 'NEUTRAL-NPCA', 'NEUTRAL-NPHE', 'NEUTRAL-NPRK', 'NEUTRAL-NPRO', 'NEUTRAL-NPTR', 'NEUTRAL-NSEP', 'NEUTRAL-NSER', 'NEUTRAL-NTHR', 'NEUTRAL-NTPO', 'NEUTRAL-NTRO', 'NEUTRAL-NTRP', 'NEUTRAL-NTY2', 'NEUTRAL-NTYQ', 'NEUTRAL-NTYR', 'NEUTRAL-NVAL', 'NEUTRAL-NWAT', 'NEUTRAL-NYCM', 'NEUTRAL-NYNM', 'NEUTRAL-NASH', 'NEUTRAL-NCYM', 'NEUTRAL-NCYX', 'NEUTRAL-NGLH', 'NEUTRAL-NHSE', 'NEUTRAL-NHSD', 'NEUTRAL-NHSP', 'NEUTRAL-NHID', 'NEUTRAL-NHIE', 'NEUTRAL-NHIP', 'NEUTRAL-NAR0', 'NEUTRAL-NLYN', 'NEUTRAL-NTYM', 'HOH', 'DA', 'DA3', 'DA5', 'RA3', 'RA5', 'DC', 'DC3', 'DC5', 'RC3', 'RC5', 'DG', 'DG3', 'DG5', 'RG3', 'RG5', 'DT3', 'RU3', 'RU5'])
+        # shortcuts for RNA, also protonated by pdb2pqr, defined in RNA_MAPPING
+        residues_protonated_by_pdb2pqr.update(["A", "C", "G", "U"])
+
+        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/without_hydrogens.cif")[0]
+        residues_protonated_by_dimorphite_dl = []
+        for res in structure.get_residues():
+            if not res.resname in residues_protonated_by_pdb2pqr:
+                residues_protonated_by_dimorphite_dl.append(res)
+
+        selector = SelectAtoms()
+        io = PDB.PDBIO()
+        io.set_structure(structure)
+        for i, res in enumerate(residues_protonated_by_dimorphite_dl, start=1):
+
+            selector.full_ids = set([atom.full_id for atom in res])
+            io.save(f"{self.data_dir}/ligand_{i}.pdb", selector)
+
+
+            from rdkit import Chem
+            from dimorphite_dl import DimorphiteDL
+
+            dimorphite_dl = DimorphiteDL(min_ph=7,
+                             max_ph=7,
+                             max_variants=1,
+                             label_states=False,
+                             pka_precision=0.01)
+
+            CCD_mol = Chem.SDMolSupplier(f"IBP_ideal.sdf",
+                          removeHs=True)[0]
+            mol_smiles = Chem.MolToSmiles(CCD_mol)
+            indices_to_original_mol = [int(x) for x in CCD_mol.GetProp('_smilesAtomOutputOrder')[1:-1].split(",")[:-1]]
+            charged_smiles = dimorphite_dl.protonate(mol_smiles)[0]
+            charged_mol = Chem.MolFromSmiles(charged_smiles)
+            for atom, index in zip(charged_mol.GetAtoms(), indices_to_original_mol):
+                CCD_mol.GetAtoms()[index].SetFormalCharge(atom.GetFormalCharge())
+            ligand_mol = Chem.MolFromPDBFile(f"{self.data_dir}/ligand_{i}.pdb", removeHs=True)
+            align = Chem.rdMolAlign.GetO3A(CCD_mol, ligand_mol)
+
+            # editable_ligand_mol = Chem.EditableMol(ligand_mol)
+            # for bond in ligand_mol.GetBonds():
+            #     editable_ligand_mol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+            # for bond in CCD_mol.GetBonds():
+            #     editable_ligand_mol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond.GetBondType())
+            # ligand_mol = editable_ligand_mol.GetMol()
+            # Chem.SanitizeMol(ligand_mol)
+            # align = Chem.rdMolAlign.GetCrippenO3A(CCD_mol, ligand_mol)
+            if len(align.Matches()) != len(ligand_mol.GetAtoms())
+
+
+
+            for match in align.Matches():
+                print(match)
+            exit()
+
+
+            for match in align.Matches():
+                ideal_heteroresidue_atom, heteroresidue_atom = match
+                print(match)
+
+                list(res.get_atoms())[heteroresidue_atom-1].dimorphite_dl_charge = CCD_mol.GetAtoms()[ideal_heteroresidue_atom-1].GetFormalCharge()
+            exit()
+
+            for atom in res.get_atoms():
+                print(atom.dimorphite_dl_charge)
+
+            exit()
+
+
+            #centrum = res.center_of_mass(geometric=True)
+
+
+
+
+        exit()
+
         biotite_protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
                                                       model=1,
                                                       extra_fields=["charge"],
                                                       include_bonds=True)
 
-        biotite_protein.bonds = biotite_structure.connect_via_residue_names(biotite_protein)
 
-        biotite_protein = biotite_protein[biotite_protein.element != "H"] # remove all hydrogens
+
+
+        biotite_protein = biotite_protein[biotite_protein.element != "H"]
+        biotite_protein.bonds = biotite_structure.connect_via_residue_names(biotite_protein)
         bond_array = biotite_protein.bonds.as_array()
         unknown_order_mask = bond_array[:, 2] == biotite_structure.BondType.ANY
         if unknown_order_mask.any():
             bond_array[unknown_order_mask, 2] = biotite_structure.BondType.SINGLE
             biotite_protein.bonds = biotite_protein.BondList(biotite_protein.array_length(), bond_array)
-
-
-        import numpy as np
         biotite_protein_with_hydrogens, _ = hydride.add_hydrogen(biotite_protein, mask=biotite_protein.hetero)
-        # biotite_protein_with_hydrogens.set_annotation(
-        #  "b_factor", np.zeros(biotite_protein_with_hydrogens.array_length(), float)
-        # )
-        # biotite_protein_with_hydrogens.set_annotation(
-        #  "occupancy", np.ones(biotite_protein_with_hydrogens.array_length(), float)
-        # )
         biotite_mmCIF_file_with_hydrogens = biotite_mmCIF.CIFFile()
         biotite_mmCIF.set_structure(biotite_mmCIF_file_with_hydrogens, biotite_protein_with_hydrogens)
-
-
         self.biotite_mmCIF_file.block["atom_site"] = biotite_mmCIF_file_with_hydrogens.block["atom_site"]
+
+
         self.biotite_mmCIF_file.write(f"{self.data_dir}/protonated_ligands.cif")
+
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
         mmcif_string = open(f"{self.data_dir}/protonated_ligands.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/protonated_ligands.cif", "w").write(repaired_mmcif_string)
-        # biotite_mmCIF_file_with_hydrogens.write(f"{self.data_dir}/protonated_ligands.cif")
+        exit()
         print("ok")
-        # todo vázané ligandy jsou protonované špatně kvůli nenačtení vazby - github issue
-        # todo jména vodíků rezidua jsou duplicitní a proto jsou pdb fixerem v další iteraci smazány smazány - github issue
+
 
     def protonate_protein(self):
-
-        # print("Fixing structure by PDBFixer... ", end="")
-        # fixer = PDBFixer(filename=f"{self.data_dir}/protonated_ligands.cif")
-        # PDBxFile.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/protonated_ligands_fixed.cif", 'w'))
-        # print("ok")
-
         print("Adding hydrogens to protein... ", end="")
-
-        # s = PDB.MMCIFParser(QUIET=True).get_structure("pdb", f"{self.data_dir}/protonated_ligands.cif") # todo change to protonated_protein.cif
-        # io = PDB.PDBIO()
-        # io.set_structure(s)
-        # io.save(f"{self.data_dir}/protonated_ligands2.cif")
-
-
         molecule = molit.Molecule(f"{self.data_dir}/protonated_ligands.cif")
-        # prepared_molecule, details = systemPrepare(molecule, pH=self.pH, return_details=True, hold_nonpeptidic_bonds=False)
-        prepared_molecule, details = systemPrepare(molecule, pH=self.pH, return_details=True, hold_nonpeptidic_bonds=True)
-
-        # print(prepared_molecule.charge)
-
-
-        prepared_molecule.write(f"{self.data_dir}/protonated_protein.cif",)
+        prepared_molecule = systemPrepare(molecule, pH=self.pH, ignore_ns_errors=True)
+        prepared_molecule.write(f"{self.data_dir}/protonated_protein.cif", )
         print("ok")
-
-
-
-
-
-
-
-
-
-        # postupovat budeme per ligand
-        # pokud je počet vodíků stejný jako v CCD, tak vodíky necháme a opíšeme formální náboje
-        # pokud je počet vodíků jiný, tak dosadíme formální náboje z CCD a doplníme vodíky pomocí hydride
-
-        # sdf from string
-
-
-
-
-        # keep hydrogens
-        # protonate protein by pdb2pqr
-        # system(f"pdb2pqr30 --titration-state-method propka "
-        #        f"--with-ph {self.pH} --pdb-output {self.data_dir}/protein_and_waters_protonated.pdb {self.data_dir}/fixed.pdb "
-        #        f"{self.data_dir}/protein_and_waters_protonated.pqr > {self.data_dir}/propka.log 2>&1 ")
-
-
-        # sežen formální náboje
-            # z pqr souboru - jak budeme přiřazovat?
-            # CCD dictionary
-
-        # oprav znovu pdbfixerem
-        # bude nutné?
+        return prepared_molecule.charge
+        exit()
 
 
 
@@ -1887,35 +440,16 @@ if __name__ == "__main__":
     args = load_arguments()
     ChargesCalculator(args.mmCIF_file, args.data_dir, args.pH).calculate_charges()
 
-
-# dotazy na Adriana
+# dotazy na chlapy
 # stahovat vždy jedno pdb a nebo stáhnout celou PDB a ?
 # jak cesty k pdb2pqr, hydride, xtb?
 # výsledky potřebujeme někam uložit aby si to pak webovka mohla tahat
-# uděláme testovací run? Třeba 100 struktur?
+# uděláme testovací run? Třeba 1000 struktur?
 # pořešit, zda to jde na vícekrát?
 
-
-# dotazy na Radkou
-# V jakých formátech chceme náboje poskytovat? Jako v AlphaCharges?
-# Chceme počítat náboje i pro vody?
-# jen první model pokud jich je více?
-
-
-
-# belbínův test osobnosti
 
 
 
 # možná nepůjde stáhnout všechno
 # určitě log pro všechny rezidua
 # nechat si vždycky verzi, se kteoru se pracovalo
-
-#todo - volba smazání tmp souborů.
-
-
-
-
-
-
-
