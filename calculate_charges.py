@@ -1,9 +1,12 @@
 import argparse
 from os import path, system
 from time import time
-import dimorphite_dl
 import biotite.structure as biotite_structure
 import biotite.structure.io.pdbx as biotite_mmCIF
+from biotite.structure.residues import get_residue_starts_for
+
+from rdkit import Chem
+from dimorphite_dl import DimorphiteDL
 
 import hydride
 from Bio import PDB
@@ -11,22 +14,33 @@ from moleculekit import molecule as molit
 from moleculekit.tools.preparation import systemPrepare
 from openmm.app import PDBxFile
 from pdbfixer import PDBFixer
-import numpy as np
 from math import dist
 import gemmi
 from collections import Counter
-import json
+
+
 
 
 def load_arguments():
     print("\nParsing arguments... ", end="")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mmCIF_file", type=str, required=True,
-                        help="mmCIF file with protein structure.")
-    parser.add_argument("--data_dir", type=str, required=True,
-                        help="Directory for saving results.")
-    parser.add_argument("--pH", type=float, required=False, default=7.2,
-                        help="PDB file with protein structure.")
+    parser.add_argument("--mmCIF_file",
+                        help="mmCIF file with protein structure.",
+                        type=str,
+                        required=True)
+    parser.add_argument("--data_dir",
+                        help="Directory for saving results.",
+                        type=str,
+                        required=True)
+    parser.add_argument("--pH",
+                        help="PDB file with protein structure.",
+                        type=float,
+                        required=False,
+                        default=7.2)
+    parser.add_argument("--delete_auxiliary_files",
+                        help="Auxiliary calculation files can be large. With this argument, "
+                             "the auxiliary files will be continuously deleted during the calculation.",
+                        action="store_true")
     args = parser.parse_args()
     if not 0 <= args.pH <= 14:
         exit(f"\nERROR! The pH value must be between 0 and 14!\n")
@@ -51,9 +65,11 @@ class ChargesCalculator:
     def __init__(self,
                  mmCIF_file: str,
                  data_dir: str,
-                 pH: float):
+                 pH: float,
+                 delete_auxiliary_files: bool):
         self.data_dir = data_dir
         self.pH = pH
+        self.delete_auxiliary_files = delete_auxiliary_files
         system(f"mkdir {self.data_dir}; "
                f"mkdir {self.data_dir}/logs; "
                f"cp {mmCIF_file} {self.data_dir}")
@@ -74,28 +90,37 @@ class ChargesCalculator:
     def calculate_charges(self):
         self.fix_structure()
         self.remove_hydrogens()
-        self.protonate_heteroresidues()
+        dimorphite_dl_charges = self.protonate_heteroresidues()
+        pdb2pqr_charges = self.protonate_protein()
 
-        propka_charges = self.protonate_protein()
-        if all(chg == 0 for chg in propka_charges):
+
+        if all(chg == 0 for chg in pdb2pqr_charges):
             exit("ERROR! Moleculekit is not modified!")
             # /home/dargen3/miniconda3/lib/python3.11/site-packages/moleculekit/tools/preparation.py
             #  line 827 ("ffcharge", "charge")
-            # https://github.com/Acellera/moleculekit/issues/136
+            # https://github.com/Acellera/mdoleculekit/issues/136
         structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/protonated_protein.cif")[0]
-
-        # structure = PDB.PDBParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0]
-        # system(f"cd {self.data_dir} ; pdb2pqr --assign-only {path.basename(self.mmCIF_file)} smazat.pqr")
-        # propka_charges = [float(line.split()[8]) for line in open(f"{self.data_dir}/smazat.pqr").readlines()[:-2]]
-
-
-        propka_charges = np.nan_to_num(propka_charges)
-        print("spch: " + str(sum(propka_charges)))
-
-        for atom, propka_charge in zip(structure.get_atoms(), propka_charges):
-            atom.propka_charge = propka_charge
-            atom.cm5_charge = None
         kdtree = PDB.NeighborSearch(list(structure.get_atoms()))
+
+        pdb2pqr_charges = np.nan_to_num(pdb2pqr_charges)
+
+
+        print(sum(pdb2pqr_charges)) # jakto že je to takto divné?
+        for atom, propka_charge in zip(structure.get_atoms(), pdb2pqr_charges):
+            atom.pdb2pqr_charge = propka_charge
+            atom.cm5_charge = None
+
+        for coord, charge in dimorphite_dl_charges.items():
+            charged_atom = kdtree.search(coord, 0.1, level="A")[0]
+            if len(charged_atom) > 1:
+                exit("Atoms too close!")
+            charged_atom.pdb2pqr_charge += charge
+
+
+
+
+
+
         selector = SelectAtoms()
         io = PDB.PDBIO()
         io.set_structure(structure)
@@ -171,7 +196,7 @@ class ChargesCalculator:
             selector.full_ids = set([atom.full_id for atom in substructure_atoms])
             io.save(f"{substructure_data_dir}/substructure.pdb", selector)
 
-            substructure_charge = round(sum([aa.propka_charge for aa in substructure_atoms]))
+            substructure_charge = round(sum([aa.pdb2pqr_charge for aa in substructure_atoms]))
 
             system(
              f"cd {substructure_data_dir} ; obabel -iPDB -oPDB substructure.pdb -h > reprotonated_substructure.pdb 2>/dev/null")
@@ -203,11 +228,12 @@ class ChargesCalculator:
                     structure[substructure_atom.full_id[2]][substructure_atom.get_parent().id][substructure_atom.id].cm5_charge = charge
 
             print(i, time() - t)
-            exit()
+            if self.delete_auxiliary_files:
+                system(f"rm -r {substructure_data_dir}")
 
-
-        charges = np.array([atom.cm5_charge for atom in structure.get_atoms()])
-        open(f"{self.data_dir}/charges.txt", "w").write(" ".join([str(x) for x in charges]))
+        from os import path
+        charges = [atom.cm5_charge for atom in structure.get_atoms()]
+        open(f"{self.data_dir}/charges.txt", "w").write(f"{path.basename(self.mmCIF_file)[:-4]}\n" + " ".join([str(x) for x in charges]))
 
 
         input_file = f"{self.data_dir}/protonated_protein.cif"
@@ -235,9 +261,10 @@ class ChargesCalculator:
                                   f"{charge: .4f}"])
         block.write_file(f"{self.data_dir}/final.cif")
 
-
-
-
+        if self.delete_auxiliary_files:
+            system(f"rm {self.mmCIF_file};"
+                   f"cd {self.data_dir};"
+                   f"rm without_hydrogens.cif protonated_protein.cif protonated_ligands.cif fixed.cif")
 
     def fix_structure(self):
         """
@@ -289,11 +316,9 @@ class ChargesCalculator:
         print("ok")
 
     def remove_hydrogens(self):
-        biotite_protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file, model=1,extra_fields=["b_factor", "occupancy"])
-        biotite_protein_without_hydrogens = biotite_protein[biotite_protein.element != "H"]
-        biotite_mmCIF_file_without_hydrogens = biotite_mmCIF.CIFFile()
-        biotite_mmCIF.set_structure(biotite_mmCIF_file_without_hydrogens, biotite_protein_without_hydrogens)
-        self.biotite_mmCIF_file.block["atom_site"] = biotite_mmCIF_file_without_hydrogens.block["atom_site"]
+        protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file, model=1,extra_fields=["b_factor", "occupancy", "charge"], include_bonds=True)
+        protein_without_hydrogens = protein[protein.element != "H"]
+        biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_without_hydrogens)
         self.biotite_mmCIF_file.write(f"{self.data_dir}/without_hydrogens.cif")
         # these three lines can be probably removed, after biotite 1.0.2 will be released
         mmcif_string = open(f"{self.data_dir}/without_hydrogens.cif").read()
@@ -323,122 +348,109 @@ class ChargesCalculator:
         residues_protonated_by_pdb2pqr.update(["A", "C", "G", "U"])
 
         structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/without_hydrogens.cif")[0]
+        for atom in structure.get_atoms():
+            atom.dimorphite_dl_charge = 0
+            atom.protonated_by_dimorphite_dl = False
+
         residues_protonated_by_dimorphite_dl = []
         for res in structure.get_residues():
             if not res.resname in residues_protonated_by_pdb2pqr:
                 residues_protonated_by_dimorphite_dl.append(res)
 
-        selector = SelectAtoms()
-        io = PDB.PDBIO()
-        io.set_structure(structure)
+        residues_protonated_by_dimorphite_dl_names = set([res.resname for res in residues_protonated_by_dimorphite_dl])
+        ideal_heteroresidues = {}
+        for ideal_heteroresidue in open("CCD/Components-pub.sdf", "r").read().split("$$$$\n"):
+            name = ideal_heteroresidue.partition("\n")[0]
+            if name in residues_protonated_by_dimorphite_dl_names:
+                supplier = Chem.SDMolSupplier()
+                supplier.SetData(ideal_heteroresidue)
+                rdkit_mol = next(supplier)
+                if rdkit_mol is not None:
+                    ideal_heteroresidues[name] = rdkit_mol
+
+        dimorphite_dl_charges = {}
         for i, res in enumerate(residues_protonated_by_dimorphite_dl, start=1):
+            try:
+                CCD_mol = ideal_heteroresidues[res.resname]
+            except KeyError:
+                # zalogovat, že ligand buď není v CCD a nebo není načetnutelný
+                continue
+            if len(list(res.get_atoms())) != len(CCD_mol.GetAtoms()):
+                # zalogovat, že ligand má jiný počet atomů než v CCD
+                continue
+            if any([ligand_atom.GetSymbol() != CCD_atom.GetSymbol() for ligand_atom, CCD_atom in zip(res.get_atoms(), CCD_mol.GetAtoms())]):
+                # zalogovat, že pořadí atomů není stejné
+                continue
+            dimorphite_dl = DimorphiteDL(min_ph=self.pH,
+                                         max_ph=self.pH,
+                                         max_variants=1,
+                                         label_states=False,
+                                         pka_precision=0.01)
+            CCD_mol_smiles = Chem.MolToSmiles(CCD_mol)
+            indices_to_CCD_mol = [int(x) for x in CCD_mol.GetProp('_smilesAtomOutputOrder')[1:-1].split(",")[:-1]]
+            charged_CCD_mol_smiles = dimorphite_dl.protonate(CCD_mol_smiles)[0]
+            charged_CCD_mol = Chem.MolFromSmiles(charged_CCD_mol_smiles)
+            res_atoms = list(res.get_atoms())
+            for atom, a_i in zip(charged_CCD_mol.GetAtoms(), indices_to_CCD_mol):
+                res_atoms[a_i].protonated_by_dimorphite_dl = True
+                formal_charge = atom.GetFormalCharge()
+                if formal_charge != 0:
+                    res_atoms[a_i].dimorphite_dl_charge = formal_charge
+                    dimorphite_dl_charges[tuple(res_atoms[a_i].coord)] = atom.GetFormalCharge()
 
-            selector.full_ids = set([atom.full_id for atom in res])
-            io.save(f"{self.data_dir}/ligand_{i}.pdb", selector)
-
-
-            from rdkit import Chem
-            from dimorphite_dl import DimorphiteDL
-
-            dimorphite_dl = DimorphiteDL(min_ph=7,
-                             max_ph=7,
-                             max_variants=1,
-                             label_states=False,
-                             pka_precision=0.01)
-
-            CCD_mol = Chem.SDMolSupplier(f"IBP_ideal.sdf",
-                          removeHs=True)[0]
-            mol_smiles = Chem.MolToSmiles(CCD_mol)
-            indices_to_original_mol = [int(x) for x in CCD_mol.GetProp('_smilesAtomOutputOrder')[1:-1].split(",")[:-1]]
-            charged_smiles = dimorphite_dl.protonate(mol_smiles)[0]
-            charged_mol = Chem.MolFromSmiles(charged_smiles)
-            for atom, index in zip(charged_mol.GetAtoms(), indices_to_original_mol):
-                CCD_mol.GetAtoms()[index].SetFormalCharge(atom.GetFormalCharge())
-            ligand_mol = Chem.MolFromPDBFile(f"{self.data_dir}/ligand_{i}.pdb", removeHs=True)
-            align = Chem.rdMolAlign.GetO3A(CCD_mol, ligand_mol)
-
-            # editable_ligand_mol = Chem.EditableMol(ligand_mol)
-            # for bond in ligand_mol.GetBonds():
-            #     editable_ligand_mol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-            # for bond in CCD_mol.GetBonds():
-            #     editable_ligand_mol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond.GetBondType())
-            # ligand_mol = editable_ligand_mol.GetMol()
-            # Chem.SanitizeMol(ligand_mol)
-            # align = Chem.rdMolAlign.GetCrippenO3A(CCD_mol, ligand_mol)
-            if len(align.Matches()) != len(ligand_mol.GetAtoms())
-
-
-
-            for match in align.Matches():
-                print(match)
-            exit()
-
-
-            for match in align.Matches():
-                ideal_heteroresidue_atom, heteroresidue_atom = match
-                print(match)
-
-                list(res.get_atoms())[heteroresidue_atom-1].dimorphite_dl_charge = CCD_mol.GetAtoms()[ideal_heteroresidue_atom-1].GetFormalCharge()
-            exit()
-
-            for atom in res.get_atoms():
-                print(atom.dimorphite_dl_charge)
-
-            exit()
-
-
-            #centrum = res.center_of_mass(geometric=True)
-
-
-
-
-        exit()
-
-        biotite_protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
-                                                      model=1,
-                                                      extra_fields=["charge"],
-                                                      include_bonds=True)
-
-
-
-
-        biotite_protein = biotite_protein[biotite_protein.element != "H"]
-        biotite_protein.bonds = biotite_structure.connect_via_residue_names(biotite_protein)
-        bond_array = biotite_protein.bonds.as_array()
+        protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
+                                              model=1,
+                                              include_bonds=True)
+        protein.charge = [atom.dimorphite_dl_charge for atom in structure.get_atoms()]
+        bond_array = protein.bonds.as_array()
         unknown_order_mask = bond_array[:, 2] == biotite_structure.BondType.ANY
         if unknown_order_mask.any():
+            print("For some bonds the bond order is unknown, hence single bonds are assumed")
             bond_array[unknown_order_mask, 2] = biotite_structure.BondType.SINGLE
-            biotite_protein.bonds = biotite_protein.BondList(biotite_protein.array_length(), bond_array)
-        biotite_protein_with_hydrogens, _ = hydride.add_hydrogen(biotite_protein, mask=biotite_protein.hetero)
-        biotite_mmCIF_file_with_hydrogens = biotite_mmCIF.CIFFile()
-        biotite_mmCIF.set_structure(biotite_mmCIF_file_with_hydrogens, biotite_protein_with_hydrogens)
-        self.biotite_mmCIF_file.block["atom_site"] = biotite_mmCIF_file_with_hydrogens.block["atom_site"]
-
-
+        protein.bonds = biotite_structure.BondList(protein.bonds.get_atom_count(), bond_array)
+        protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=[atom.protonated_by_dimorphite_dl for atom in structure.get_atoms()])
+        biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_with_hydrogens)
+        bond_array = protein_with_hydrogens.bonds.as_array()
+        residue_starts_1, residue_starts_2 = (
+            get_residue_starts_for(protein_with_hydrogens, bond_array[:, :2].flatten()).reshape(-1, 2).T)
+        interresidual_bonds = bond_array[residue_starts_1 != residue_starts_2]
+        ptnr1_auth_asym_id = []
+        ptnr2_auth_asym_id = []
+        ptnr1_auth_seq_id = []
+        ptnr2_auth_seq_id = []
+        protein_auth_asym_id = self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()
+        protein_auth_seq_id = self.biotite_mmCIF_file.block["atom_site"]["auth_seq_id"].as_array()
+        for a1, a2, _ in interresidual_bonds:
+            ptnr1_auth_asym_id.append(protein_auth_asym_id[a1])
+            ptnr2_auth_asym_id.append(protein_auth_asym_id[a2])
+            ptnr1_auth_seq_id.append(protein_auth_seq_id[a1])
+            ptnr2_auth_seq_id.append(protein_auth_seq_id[a2])
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"] = ptnr1_auth_asym_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"] = ptnr2_auth_asym_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_seq_id"] = ptnr1_auth_seq_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_seq_id"] = ptnr2_auth_seq_id
         self.biotite_mmCIF_file.write(f"{self.data_dir}/protonated_ligands.cif")
-
         # these three lines can be probably removed, after biotite 1.0.2 will be released
         mmcif_string = open(f"{self.data_dir}/protonated_ligands.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/protonated_ligands.cif", "w").write(repaired_mmcif_string)
-        exit()
         print("ok")
+        return dimorphite_dl_charges
 
 
     def protonate_protein(self):
         print("Adding hydrogens to protein... ", end="")
         molecule = molit.Molecule(f"{self.data_dir}/protonated_ligands.cif")
-        prepared_molecule = systemPrepare(molecule, pH=self.pH, ignore_ns_errors=True)
+        prepared_molecule = systemPrepare(molecule, pH=self.pH, ignore_ns_errors=True, _molkit_ff=False)
         prepared_molecule.write(f"{self.data_dir}/protonated_protein.cif", )
-        print("ok")
         return prepared_molecule.charge
-        exit()
+
 
 
 
 if __name__ == "__main__":
     args = load_arguments()
-    ChargesCalculator(args.mmCIF_file, args.data_dir, args.pH).calculate_charges()
+    ChargesCalculator(args.mmCIF_file, args.data_dir, args.pH, args.delete_auxiliary_files).calculate_charges()
 
 # dotazy na chlapy
 # stahovat vždy jedno pdb a nebo stáhnout celou PDB a ?
