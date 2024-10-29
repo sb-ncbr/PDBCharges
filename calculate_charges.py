@@ -102,7 +102,10 @@ class ChargesCalculator:
         structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/protonated_protein.cif")[0]
         kdtree = PDB.NeighborSearch(list(structure.get_atoms()))
 
+        import numpy as np
         pdb2pqr_charges = np.nan_to_num(pdb2pqr_charges)
+
+
 
 
         print(sum(pdb2pqr_charges)) # jakto že je to takto divné?
