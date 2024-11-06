@@ -23,3 +23,12 @@ python setup.py install
 je potřeba upravit moleculekit
 v souboru miniconda3/lib/python3.11/site-packages/moleculekit/tools/preparation.py 
 ve funkci _biomolecule_to_molecule do seznamu propmap dopsat ("ffcharge", "charge")
+
+
+Pořešit:
+
+jak cesty k pdb2pqr, hydride, xtb?
+výsledky potřebujeme někam uložit aby si to pak webovka mohla tahat
+možná nepůjde stáhnout všechno
+určitě log pro všechny rezidua
+nechat si vždycky verzi, se kteoru se pracovalo

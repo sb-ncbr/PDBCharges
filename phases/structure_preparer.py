@@ -1,21 +1,15 @@
+from os import system,path
 import argparse
-from math import dist
-from os import path, system
-from time import time
-
 
 from biotite.structure import BondType, BondList, residue_iter, get_residue_starts
-from biotite.structure.io import pdbx as mmCIF
+from biotite.structure.io import pdbx as biotite_mmCIF
 
-import gemmi
 import hydride
 import numpy as np
-from Bio import PDB
 from biotite.structure.residues import get_residue_starts_for
 from dimorphite_dl import DimorphiteDL
 from moleculekit import molecule as molit
 from moleculekit.tools.preparation import systemPrepare
-from numba.cuda import atomic
 from openmm.app import PDBxFile
 from pdbfixer import PDBFixer
 from rdkit import Chem
@@ -47,81 +41,76 @@ def load_arguments():
     return args
 
 
-def fix_structure(input_mmCIF_file: str,
-                  data_dir: str):
-    """
-    mmCIF file is fixed by tool PDBFixer.
-    https://github.com/openmm/pdbfixer
-
-    PDBFixer solves common problems in protein structure files.
-    It selects the first model, alternative locations, fills in missing heavy atoms, etc.
-    """
-
-    print("Fixing structure... ", end="")
-    fixer = PDBFixer(filename=input_mmCIF_file)
-    set_of_resnames = set([x.name for x in fixer.topology.residues()])
-
-    # download templates for heteroresidues
-    fixer_available_resnames = set(fixer.templates.keys())
-    for resname in set_of_resnames:
-        if resname not in fixer_available_resnames:
-            try:
-                fixer.downloadTemplate(resname)
-            except:
-                exit(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
-
-    # add heavy atoms
-    fixer.missingResidues = {}
-    fixer.findMissingAtoms()
-    # with open(f"{self.data_dir}/logs/added_heavy_atoms.txt", "w") as added_heavy_atoms_file: # log it TODO
-    #     for residue, residue_list in fixer.missingAtoms.items():
-    #         for atom in residue_list:
-    #             added_heavy_atoms_file.write(f"{residue} {atom}\n")
-    fixer.addMissingAtoms()
-
-    # write fixed structure to file
-    PDBxFile.writeFile(fixer.topology, fixer.positions, open(f"{data_dir}/fixed.cif", 'w'), keepIds=True)
-
-    # PDBFixer removes values from a struct_conn block
-    # and therefore only atom_site block is overwritten from PDBFixer to fixed.cif.
-    biotite_mmCIF_file = mmCIF.CIFFile.read(input_mmCIF_file)
-    fixed_mmCIF_file = mmCIF.CIFFile.read(f"{data_dir}/fixed.cif")
-    biotite_mmCIF_file.block["atom_site"] = fixed_mmCIF_file.block["atom_site"]
-    biotite_mmCIF_file.write(f"{data_dir}/fixed.cif")
-    # these three lines can be probably removed, after biotite 1.0.2 will be released
-    mmcif_string = open(f"{data_dir}/fixed.cif").read()
-    repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
-    open(f"{data_dir}/fixed.cif", "w").write(repaired_mmcif_string)
-    print("ok")
-
-
 class StructurePreparer:
     def __init__(self,
-                 input_mmCIF_file: str,
+                 mmCIF_file: str,
                  data_dir: str,
+                 delete_auxiliary_files: bool,
                  pH: float=7.2):
-        self.mmCIF_file = mmCIF.CIFFile.read(input_mmCIF_file)
+        self.mmCIF_file = mmCIF_file
         self.data_dir = data_dir
+        self.delete_auxiliary_files = delete_auxiliary_files
         self.pH = pH
+        self.biotite_mmCIF_file = biotite_mmCIF.CIFFile.read(self.mmCIF_file)
+        system(f"mkdir {self.data_dir}")
 
-        self.remove_hydrogens()
-        self.protonate_by_hydride() # add hydrogens to the residues that the moleculekit can't process
-        self.protonate_by_moleculekit() # add hydrogens to rest of structure
+    def fix_structure(self):
+        """
+        mmCIF file is fixed by tool PDBFixer.
+        https://github.com/openmm/pdbfixer
 
+        PDBFixer solves common problems in protein structure files.
+        It selects the first model, alternative locations, fills in missing heavy atoms, etc.
+        """
 
+        print("Fixing structure... ", end="")
+        fixer = PDBFixer(filename=self.mmCIF_file)
+        set_of_resnames = set([x.name for x in fixer.topology.residues()])
+
+        # download templates for heteroresidues
+        fixer_available_resnames = set(fixer.templates.keys())
+        for resname in set_of_resnames:
+            if resname not in fixer_available_resnames:
+                try:
+                    fixer.downloadTemplate(resname)
+                except:
+                    exit(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
+
+        # add heavy atoms
+        fixer.missingResidues = {}
+        fixer.findMissingAtoms()
+        # with open(f"{self.data_dir}/logs/added_heavy_atoms.txt", "w") as added_heavy_atoms_file: # log it TODO
+        #     for residue, residue_list in fixer.missingAtoms.items():
+        #         for atom in residue_list:
+        #             added_heavy_atoms_file.write(f"{residue} {atom}\n")
+        fixer.addMissingAtoms()
+
+        # write fixed structure to file
+        PDBxFile.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/pdbfixer.cif", 'w'), keepIds=True)
+
+        # PDBFixer removes values from a struct_conn block
+        # and therefore only atom_site block is overwritten from PDBFixer to pdbfixer.cif.
+        fixed_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/pdbfixer.cif")
+        self.biotite_mmCIF_file.block["atom_site"] = fixed_mmCIF_file.block["atom_site"]
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/pdbfixer.cif")
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
+        mmcif_string = open(f"{self.data_dir}/pdbfixer.cif").read()
+        repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        open(f"{self.data_dir}/pdbfixer.cif", "w").write(repaired_mmcif_string)
+        print("ok")
 
     def remove_hydrogens(self):
         print("Removing hydrogens ... ", end="")
-        protein = mmCIF.get_structure(self.mmCIF_file,
-                                              model=1,
-                                              extra_fields=["b_factor", "occupancy", "charge"],
-                                              include_bonds=True)
+        protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
+                                      model=1,
+                                      extra_fields=["b_factor", "occupancy", "charge"],
+                                      include_bonds=True)
         protein_without_hydrogens = protein[protein.element != "H"]
-        mmCIF.set_structure(self.mmCIF_file, protein_without_hydrogens)
+        biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_without_hydrogens)
         print("ok")
 
 
-    def protonate_by_hydride(self):
+    def add_hydrogens_by_hydride(self):
         """
         This function is based on the biotite, hydride, RDKit and dimorphite_dl libraries.
         https://github.com/biotite-dev/biotite
@@ -129,12 +118,12 @@ class StructurePreparer:
         https://github.com/rdkit/rdkit
         https://github.com/durrantlab/dimorphite_dl
 
-        The heteroresidues are protonated by the hydride library, which is built on top of the biotite library.
-        Prior to the actual protonation, the formal charges are loaded from CCD dictionary and extended by the dimorphite_dl.
+        Hydrogens are added to the heteroresidues by the hydride library, which is built on top of the biotite library.
+        Prior to the adding of hydrogens, the formal charges are loaded from CCD dictionary and extended by the dimorphite_dl.
         Dimorphite_dl formal charges are mapped to CCD molecule by RDKit library.
         """
 
-        print("Adding hydrogens to heteroresidues... ", end="")
+        print("Adding hydrogens by hydride... ", end="")
         # pdb2pqr is part of moleculekit
         residues_processed_by_pdb2pqr = set(
             ['004', '03Y', '0A1', '0AF', '0BN', '1MH', '2AS', '2GX', '2ML', '2MR', '4IN', '4PH', '4PQ', '5JP', 'AA4',
@@ -206,10 +195,10 @@ class StructurePreparer:
              'NEUTRAL-NHSP', 'NEUTRAL-NHID', 'NEUTRAL-NHIE', 'NEUTRAL-NHIP', 'NEUTRAL-NAR0', 'NEUTRAL-NLYN',
              'NEUTRAL-NTYM', 'HOH', 'DA', 'DA3', 'DA5', 'RA3', 'RA5', 'DC', 'DC3', 'DC5', 'RC3', 'RC5', 'DG', 'DG3',
              'DG5', 'RG3', 'RG5', 'DT3', 'RU3', 'RU5'])
-        # shortcuts for RNA, also protonated by pdb2pqr, defined in RNA_MAPPING
+        # shortcuts for RNA, also processed by pdb2pqr, defined in RNA_MAPPING
         residues_processed_by_pdb2pqr.update(["A", "C", "G", "U"])
 
-        protein = mmCIF.get_structure(self.mmCIF_file,
+        protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
                                               model=1,
                                               extra_fields=["b_factor", "occupancy", "charge"],
                                               include_bonds=True)
@@ -317,7 +306,7 @@ class StructurePreparer:
 
 
         protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=protein.hydride_mask)
-        mmCIF.set_structure(self.mmCIF_file, protein_with_hydrogens)
+        biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_with_hydrogens)
         bond_array = protein_with_hydrogens.bonds.as_array()
         residue_starts_1, residue_starts_2 = (
             get_residue_starts_for(protein_with_hydrogens, bond_array[:, :2].flatten()).reshape(-1, 2).T)
@@ -326,20 +315,20 @@ class StructurePreparer:
         ptnr2_auth_asym_id = []
         ptnr1_auth_seq_id = []
         ptnr2_auth_seq_id = []
-        protein_auth_asym_id = self.mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()
-        protein_auth_seq_id = self.mmCIF_file.block["atom_site"]["auth_seq_id"].as_array()
+        protein_auth_asym_id = self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()
+        protein_auth_seq_id = self.biotite_mmCIF_file.block["atom_site"]["auth_seq_id"].as_array()
         for a1, a2, _ in interresidual_bonds:
             ptnr1_auth_asym_id.append(protein_auth_asym_id[a1])
             ptnr2_auth_asym_id.append(protein_auth_asym_id[a2])
             ptnr1_auth_seq_id.append(protein_auth_seq_id[a1])
             ptnr2_auth_seq_id.append(protein_auth_seq_id[a2])
-        self.mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"] = ptnr1_auth_asym_id
-        self.mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"] = ptnr2_auth_asym_id
-        self.mmCIF_file.block["struct_conn"]["ptnr1_auth_seq_id"] = ptnr1_auth_seq_id
-        self.mmCIF_file.block["struct_conn"]["ptnr2_auth_seq_id"] = ptnr2_auth_seq_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"] = ptnr1_auth_asym_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"] = ptnr2_auth_asym_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_seq_id"] = ptnr1_auth_seq_id
+        self.biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_seq_id"] = ptnr2_auth_seq_id
 
-        self.label_asym_ids = sorted(set(self.mmCIF_file.block["atom_site"]["label_asym_id"].as_array()))
-        self.auth_asym_ids = sorted(set(self.mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()))
+        self.label_asym_ids = sorted(set(self.biotite_mmCIF_file.block["atom_site"]["label_asym_id"].as_array()))
+        self.auth_asym_ids = sorted(set(self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()))
         self.one_symbol_chains = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         if len(self.label_asym_ids) > 52 or len(self.auth_asym_ids) > 52:
             exit(
@@ -347,28 +336,28 @@ class StructurePreparer:
 
         presented_label_asym_id = {key: self.one_symbol_chains[index] for index, key in enumerate(self.label_asym_ids)}
         presented_auth_asym_id = {key: self.one_symbol_chains[index] for index, key in enumerate(self.auth_asym_ids)}
-        self.mmCIF_file.block["atom_site"]["label_asym_id"] = [presented_label_asym_id[key] for key in
-                                                                       self.mmCIF_file.block["atom_site"][
+        self.biotite_mmCIF_file.block["atom_site"]["label_asym_id"] = [presented_label_asym_id[key] for key in
+                                                                       self.biotite_mmCIF_file.block["atom_site"][
                                                                            "label_asym_id"].as_array()]
-        self.mmCIF_file.block["atom_site"]["auth_asym_id"] = [presented_auth_asym_id[key] for key in
-                                                                      self.mmCIF_file.block["atom_site"][
+        self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"] = [presented_auth_asym_id[key] for key in
+                                                                      self.biotite_mmCIF_file.block["atom_site"][
                                                                           "auth_asym_id"].as_array()]
 
-        self.mmCIF_file.write(f"{self.data_dir}/protonated_ligands.cif")
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/hydride.cif")
         # these three lines can be probably removed, after biotite 1.0.2 will be released
-        mmcif_string = open(f"{self.data_dir}/protonated_ligands.cif").read()
+        mmcif_string = open(f"{self.data_dir}/hydride.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
-        open(f"{self.data_dir}/protonated_ligands.cif", "w").write(repaired_mmcif_string)
+        open(f"{self.data_dir}/hydride.cif", "w").write(repaired_mmcif_string)
         print("ok")
 
-    def protonate_by_moleculekit(self):
-        print("Adding hydrogens to protein... ", end="")
-        molecule = molit.Molecule(f"{self.data_dir}/protonated_ligands.cif")
+    def add_hydrogens_by_moleculekit(self):
+        print("Adding hydrogens by moleculekit... ", end="")
+        molecule = molit.Molecule(f"{self.data_dir}/hydride.cif")
         prepared_molecule = systemPrepare(molecule,
                                           pH=self.pH,
                                           ignore_ns_errors=True,
                                           _molkit_ff=False)
-        prepared_molecule.write(f"{self.data_dir}/protonated_protein.cif", )
+        prepared_molecule.write(f"{self.data_dir}/moleculekit.cif", )
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
         if all(chg == 0 for chg in pdb2pqr_charges):
             exit("ERROR! Moleculekit is not modified!")
@@ -379,212 +368,5 @@ class StructurePreparer:
 
         # print(sum(pdb2pqr_charges)) # jakto že je to takto divné? todo dopsat warning!
         self.atomic_charges = pdb2pqr_charges + prepared_molecule.formalcharge
-        print("ok")
+        print("ok\n")
 
-
-class SelectAtoms(PDB.Select):
-    def accept_atom(self, atom):
-        if atom.full_id in self.full_ids:
-            return 1
-        else:
-            return 0
-
-
-class ChargesCalculator:
-    def __init__(self,
-                 mmCIF_file: str,
-                 atomic_charge_estimations: np.array,
-                 data_dir: str,
-                 delete_auxiliary_files: bool):
-        print("Loading structure... ", end="")
-        self.mmCIF_file = mmCIF_file
-        self.data_dir = data_dir
-        self.atomic_charge_estimations = atomic_charge_estimations
-        self.delete_auxiliary_files = delete_auxiliary_files
-        print("ok")
-
-
-    def calculate_charges(self):
-        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0]
-        kdtree = PDB.NeighborSearch(list(structure.get_atoms()))
-
-        for atom, atomic_charge_estimation in zip(structure.get_atoms(), self.atomic_charge_estimations):
-            atom.atomic_charge_estimation = atomic_charge_estimation
-            atom.cm5_charge = None
-
-        selector = SelectAtoms()
-        io = PDB.PDBIO()
-        io.set_structure(structure)
-        radius = 6
-        for i, atom in enumerate(structure.get_atoms()):
-            if atom.element == "H":
-                continue
-            if atom.element == "O":
-                if len(kdtree.search(atom.coord, 1.5, level="A")) <= 2:
-                    continue
-
-            t = time()
-            substructure_data_dir = f"{self.data_dir}/sub_{i}"
-            system(f"mkdir {substructure_data_dir}")
-
-            atoms_up_to_radius = kdtree.search(atom.coord, radius, level="A")
-            selector.full_ids = set([atom.full_id for atom in atoms_up_to_radius])
-            io.save(f"{substructure_data_dir}/atoms_up_to_{radius}_angstroms.pdb", selector)
-
-            atoms_up_to_12A = kdtree.search(atom.coord, 12, level="A")
-            selector.full_ids = set([atom.full_id for atom in atoms_up_to_12A])
-            io.save(f"{substructure_data_dir}/atoms_up_to_12_angstroms.pdb", selector)
-
-            calculated_atoms = kdtree.search(atom.coord, 1.5, level="A") # ať se počítají jen centrální atom, dvouvazné kyslíky a vodíky
-            calculated_atoms_full_ids = set([calculated_atom.full_id[1:] for calculated_atom in calculated_atoms])
-
-            mol_6A = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_up_to_{radius}_angstroms.pdb", removeHs=False, sanitize=False)
-            mol_6A_conformer = mol_6A.GetConformer()
-            mol_12A = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_up_to_12_angstroms.pdb", removeHs=False, sanitize=False)
-            mol_12A_conformer = mol_12A.GetConformer()
-
-
-            mol_6A_coord_dict = {}
-            for aatom in mol_6A.GetAtoms():
-                position = mol_6A_conformer.GetAtomPosition(aatom.GetIdx())
-                mol_6A_coord_dict[(position.x, position.y, position.z)] = aatom
-            mol_12A_coord_dict = {}
-            for aatom in mol_12A.GetAtoms():
-                position = mol_12A_conformer.GetAtomPosition(aatom.GetIdx())
-                mol_12A_coord_dict[(position.x, position.y, position.z)] = aatom
-
-            atoms_with_broken_bonds = []
-            for aatom in mol_6A.GetAtoms():
-                position = mol_6A_conformer.GetAtomPosition(aatom.GetIdx())
-                mol_12A_atom = mol_12A_coord_dict[(position.x, position.y, position.z)]
-                if len(aatom.GetNeighbors()) != len(mol_12A_atom.GetNeighbors()):
-                    atoms_with_broken_bonds.append(mol_12A_atom)
-
-            carbons_with_broken_bonds_positions = []
-            while atoms_with_broken_bonds:
-                atom_with_broken_bonds = atoms_with_broken_bonds.pop(0)
-                bonded_atoms = atom_with_broken_bonds.GetNeighbors()
-                for ba in bonded_atoms:
-                    position = mol_12A_conformer.GetAtomPosition(ba.GetIdx())
-                    if (position.x, position.y, position.z) in mol_6A_coord_dict:
-                        continue
-                    else:
-                        if atom_with_broken_bonds.GetSymbol() == "C" and ba.GetSymbol() == "C":
-                            carbons_with_broken_bonds_positions.append(mol_12A_conformer.GetAtomPosition(atom_with_broken_bonds.GetIdx()))
-                            continue
-                        else:
-                            atoms_with_broken_bonds.append(ba)
-                            mol_6A_coord_dict[(position.x, position.y, position.z)] = ba
-
-            substructure_atoms = []
-            for atom in atoms_up_to_12A:
-                if tuple(round(float(x),3) for x in atom.coord) in mol_6A_coord_dict:
-                    substructure_atoms.append(atom)
-
-
-            selector.full_ids = set([atom.full_id for atom in substructure_atoms])
-            io.save(f"{substructure_data_dir}/substructure.pdb", selector)
-
-            substructure_charge = round(sum([atom.atomic_charge_estimation for atom in substructure_atoms]))
-            # log, pokud to není celé číslo!
-
-            system(
-             f"cd {substructure_data_dir} ; obabel -iPDB -oPDB substructure.pdb -h > reprotonated_substructure.pdb 2>/dev/null")
-            with open(f"{substructure_data_dir}/reprotonated_substructure.pdb") as reprotonated_substructure_file:
-                atom_lines = [line for line in reprotonated_substructure_file.readlines() if line[:4] in ["ATOM", "HETA"]]
-                original_atoms = atom_lines[:len(substructure_atoms)]
-                added_atoms = atom_lines[len(substructure_atoms):]
-
-
-            with open(f"{substructure_data_dir}/repaired_substructure.pdb", "w") as repaired_substructure_file:
-                repaired_substructure_file.write("".join(original_atoms))
-                for added_atom in added_atoms:
-
-                    if any([dist([float(added_atom[30:38]), float(added_atom[38:46]), float(added_atom[46:54])], (p.x, p.y, p.z)) < 1.3 for p in carbons_with_broken_bonds_positions]):
-                        repaired_substructure_file.write(added_atom)
-
-            system(f"cd {substructure_data_dir} ; "
-                   f"xtb repaired_substructure.pdb --gfn 1 --gbsa water --acc 1000 --chrg {substructure_charge}   > xtb_output.txt 2> xtb_error_output.txt ")
-
-
-            xtb_output_file_lines = open(f"{substructure_data_dir}/xtb_output.txt").readlines()
-            charge_headline_index = xtb_output_file_lines.index(
-                "  Mulliken/CM5 charges         n(s)   n(p)   n(d)\n")
-            for substructure_index, substructure_atom in enumerate(PDB.PDBParser().get_structure("substructure",
-                                                                                 f"{substructure_data_dir}/substructure.pdb").get_atoms()):
-                if substructure_atom.full_id[1:] in calculated_atoms_full_ids: # todo, nejspíše přepisujeme přesněji vypočítané náboje za horši!
-                    charge = float(xtb_output_file_lines[charge_headline_index + substructure_index + 1].split()[3])
-                    structure[substructure_atom.full_id[2]][substructure_atom.get_parent().id][substructure_atom.id].cm5_charge = charge
-
-            print(i, time() - t)
-            if self.delete_auxiliary_files:
-                system(f"rm -r {substructure_data_dir}")
-
-        from os import path
-        charges = [atom.cm5_charge for atom in structure.get_atoms()]
-        open(f"{self.data_dir}/charges.txt", "w").write(f"{path.basename(self.mmCIF_file)[:-4]}\n" + " ".join([str(x) for x in charges]))
-
-
-        input_file = f"{self.data_dir}/protonated_protein.cif"
-        structure = gemmi.cif.read_file(input_file)
-        block = structure.sole_block()
-        block.find_mmcif_category('_chem_comp.').erase() # remove pesky _chem_comp category >:(
-        sb_ncbr_partial_atomic_charges_meta_prefix = "_sb_ncbr_partial_atomic_charges_meta."
-        sb_ncbr_partial_atomic_charges_meta_attributes = ["id",
-                                                  "type",
-                                                  "method"]
-        metadata_loop = block.init_loop(sb_ncbr_partial_atomic_charges_meta_prefix,
-                                        sb_ncbr_partial_atomic_charges_meta_attributes)
-        metadata_loop.add_row(['1',
-                               "'empirical'",
-                               "'SQE+qp/Schindler 2021 (PUB_pept)'"])
-        sb_ncbr_partial_atomic_charges_prefix = "_sb_ncbr_partial_atomic_charges."
-        sb_ncbr_partial_atomic_charges_attributes = ["type_id",
-                                             "atom_id",
-                                             "charge"]
-        charges_loop = block.init_loop(sb_ncbr_partial_atomic_charges_prefix,
-                                       sb_ncbr_partial_atomic_charges_attributes)
-        for atomId, charge in enumerate(charges):
-            charges_loop.add_row(["1",
-                                  f"{atomId + 1}",
-                                  f"{charge: .4f}"])
-        block.write_file(f"{self.data_dir}/final.cif")
-
-        if self.delete_auxiliary_files:
-            system(f"rm {self.mmCIF_file};"
-                   f"cd {self.data_dir};"
-                   f"rm without_hydrogens.cif protonated_protein.cif protonated_ligands.cif fixed.cif")
-
-
-
-if __name__ == "__main__":
-    args = load_arguments()
-
-    system(f"mkdir {args.data_dir}; "
-           f"cp {args.mmCIF_file} {args.data_dir}")
-
-    fix_structure(input_mmCIF_file=f"{args.data_dir}/{path.basename(args.mmCIF_file)}",
-                  data_dir=args.data_dir)
-
-    prepared_structure = StructurePreparer(input_mmCIF_file=f"{args.data_dir}/fixed.cif",
-                                           data_dir=args.data_dir)
-
-    calculator = ChargesCalculator(mmCIF_file=f"{args.data_dir}/protonated_protein.cif",
-                                   atomic_charge_estimations=prepared_structure.atomic_charges,
-                                   data_dir=args.data_dir,
-                                   delete_auxiliary_files=args.delete_auxiliary_files)
-    calculator.calculate_charges()
-
-# dotazy na chlapy
-# stahovat vždy jedno pdb a nebo stáhnout celou PDB a ?
-# jak cesty k pdb2pqr, hydride, xtb?
-# výsledky potřebujeme někam uložit aby si to pak webovka mohla tahat
-# uděláme testovací run? Třeba 1000 struktur?
-# pořešit, zda to jde na vícekrát?
-
-
-
-
-# možná nepůjde stáhnout všechno
-# určitě log pro všechny rezidua
-# nechat si vždycky verzi, se kteoru se pracovalo
