@@ -46,13 +46,14 @@ class StructurePreparer:
                  mmCIF_file: str,
                  data_dir: str,
                  delete_auxiliary_files: bool,
-                 pH: float=7.2):
+                 save_charges_estimation: bool = True):
         self.mmCIF_file = mmCIF_file
         self.data_dir = data_dir
         self.delete_auxiliary_files = delete_auxiliary_files
-        self.pH = pH
         self.biotite_mmCIF_file = biotite_mmCIF.CIFFile.read(self.mmCIF_file)
+        self.save_charges_estimation = save_charges_estimation
         system(f"mkdir {self.data_dir}")
+        self.pH = 7.2
 
     def fix_structure(self):
         """
@@ -283,18 +284,26 @@ class StructurePreparer:
                 # logovat podle logu! 1) není načetnutelný, nešlo dimorphite, šlo dimorphite
 
                 if len(res) != len(formal_charges):
-                    # zalogovat, že ligand má jiný počet atomů než v CCD, necháváme neutrální
+                    # zalogovat, že ligand má jiný počet atomů než v CCD, necháváme neutrální, protonuje hydride
                     continue
 
                 # kontrolovat pořadí!!! TODO
                 # toto souvisí i s tím, jak budeme nakládat s ligandy, které budou mít menší počet atomů než v CCD, domyslet!
 
 
-
                 for atom_i, (atom, formal_charge) in enumerate(zip(res, formal_charges), start=res_start_i):
                     protein.charge[atom_i] = formal_charge
                     protein.hydride_mask[atom_i] = True
                 # zalogovat, že ligandu jsou přiřazeny náboje buď podle CCD a nebo podle dimorphite_dl
+
+
+                res_radius =
+
+                # zjisti poloměr ligandu
+                # ulož substrukturu o poloměru poloměr + 5A
+                # načti rdkitem
+                # iteruj nad vazbami a kontroluj zda jsou v hydride
+                # pokud najdeš vazbu která tam není, tak ji přidej
 
 
         bond_array = protein.bonds.as_array()
@@ -357,7 +366,7 @@ class StructurePreparer:
                                           pH=self.pH,
                                           ignore_ns_errors=True,
                                           _molkit_ff=False)
-        prepared_molecule.write(f"{self.data_dir}/moleculekit.cif", )
+        prepared_molecule.write(f"{self.data_dir}/moleculekit.cif")
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
         if all(chg == 0 for chg in pdb2pqr_charges):
             exit("ERROR! Moleculekit is not modified!")
@@ -367,6 +376,14 @@ class StructurePreparer:
             # https://github.com/Acellera/mdoleculekit/issues/136
 
         # print(sum(pdb2pqr_charges)) # jakto že je to takto divné? todo dopsat warning!
-        self.atomic_charges = pdb2pqr_charges + prepared_molecule.formalcharge
-        print("ok\n")
 
+        moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/moleculekit.cif")
+        self.biotite_mmCIF_file.block["atom_site"] = moleculekit_mmCIF_file.block["atom_site"]
+        if self.save_charges_estimation:
+            self.biotite_mmCIF_file.block["atom_site"]["charge_estimation"] = [round(charge, 4) for charge in pdb2pqr_charges + prepared_molecule.formalcharge]
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/moleculekit.cif")
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
+        mmcif_string = open(f"{self.data_dir}/moleculekit.cif").read()
+        repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        open(f"{self.data_dir}/moleculekit.cif", "w").write(repaired_mmcif_string)
+        print("ok")

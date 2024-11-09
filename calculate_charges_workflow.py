@@ -49,7 +49,6 @@ if __name__ == "__main__":
 
     calculator = ChargeCalculator(mmCIF_file=f"{args.data_dir}/structure_preparer/moleculekit.cif",
                                   data_dir=f"{args.data_dir}/charges_calculator",
-                                  atomic_charge_estimations=structure_preparer.atomic_charges,
                                   delete_auxiliary_files=args.delete_auxiliary_files)
     calculator.calculate_charges()
     calculator.write_charges_to_files()
