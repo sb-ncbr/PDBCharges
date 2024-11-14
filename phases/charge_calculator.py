@@ -1,6 +1,7 @@
 import argparse
 from math import dist
 from os import path, system
+from .atom_selector import AtomSelector
 
 import gemmi
 from Bio import PDB
@@ -32,14 +33,6 @@ def load_arguments():
     return args
 
 
-class SelectAtoms(PDB.Select):
-    def accept_atom(self, atom):
-        if atom.full_id in self.full_ids:
-            return 1
-        else:
-            return 0
-
-
 class ChargeCalculator:
     def __init__(self,
                  mmCIF_file: str,
@@ -62,7 +55,7 @@ class ChargeCalculator:
         structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0]
         structure_atoms = list(structure.get_atoms())
         structure_num_of_atoms = len(structure_atoms)
-        selector = SelectAtoms()
+        selector = AtomSelector()
         io = PDB.PDBIO()
         io.set_structure(structure)
         kdtree = PDB.NeighborSearch(structure_atoms)

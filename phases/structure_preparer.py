@@ -1,10 +1,14 @@
 from os import system,path
 import argparse
 
-from biotite.structure import BondType, BondList, residue_iter, get_residue_starts
+from biotite.structure import BondType, BondList
 from biotite.structure.io import pdbx as biotite_mmCIF
+from .atom_selector import AtomSelector
+from .chain_changer import change_chain_names
 
 import hydride
+from Bio import PDB
+
 import numpy as np
 from biotite.structure.residues import get_residue_starts_for
 from dimorphite_dl import DimorphiteDL
@@ -108,6 +112,11 @@ class StructurePreparer:
                                       include_bonds=True)
         protein_without_hydrogens = protein[protein.element != "H"]
         biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_without_hydrogens)
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/without_hydrogens.cif")
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
+        mmcif_string = open(f"{self.data_dir}/without_hydrogens.cif").read()
+        repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        open(f"{self.data_dir}/without_hydrogens.cif", "w").write(repaired_mmcif_string)
         print("ok")
 
 
@@ -199,16 +208,30 @@ class StructurePreparer:
         # shortcuts for RNA, also processed by pdb2pqr, defined in RNA_MAPPING
         residues_processed_by_pdb2pqr.update(["A", "C", "G", "U"])
 
+        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/without_hydrogens.cif")[0]
+        structure_atoms = list(structure.get_atoms())
+        structure_num_of_atoms = len(structure_atoms)
+        selector = AtomSelector()
+        io = PDB.PDBIO()
+        io.set_structure(structure)
+        kdtree = PDB.NeighborSearch(structure_atoms)
+        for atom in structure_atoms:
+            atom.charge_estimation = 0
+            atom.hydride_mask = False
+
+        residues_processed_by_hydride = [res for res in structure.get_residues() if res.resname not in residues_processed_by_pdb2pqr]
+        # todo!! je to tak správně? titruje je propka?
+
+
         protein = biotite_mmCIF.get_structure(self.biotite_mmCIF_file,
                                               model=1,
                                               extra_fields=["b_factor", "occupancy", "charge"],
                                               include_bonds=True)
 
+        # for biopython_atom, biotite_atom in zip(structure_atoms, protein):
+        #     print(biopython_atom.full_id, biotite_atom)
+        # exit()
 
-        protein.set_annotation("hydride_mask", [False for _ in range(len(protein))])
-
-        residues_processed_by_hydride = [(res, res_start_i) for res, res_start_i in zip(residue_iter(protein), get_residue_starts(protein)) if res.res_name[0] not in residues_processed_by_pdb2pqr]
-        # todo!! je to tak správně? titruje je propka?
 
         if residues_processed_by_hydride:
             # load formal charges for ligand from CCD. Add other formal charges by dimorphite
@@ -217,7 +240,8 @@ class StructurePreparer:
                                       max_variants=1,
                                       label_states=False,
                                       pka_precision=0.001)
-            residues_processed_by_hydride_names = set([res.res_name[0] for res, _ in residues_processed_by_hydride])
+            residues_processed_by_hydride_names = set([res.resname for res in residues_processed_by_hydride])
+            # residues_processed_by_hydride_names = set([res.res_name[0] for res, _ in residues_processed_by_hydride])
             residues_processed_by_hydride_formal_charges = {}
             for CCD_mol_sdf in open("CCD/Components-pub.sdf", "r").read().split("$$$$\n"):
                 mol_name = CCD_mol_sdf.partition("\n")[0]
@@ -275,9 +299,9 @@ class StructurePreparer:
                                                                                       "The formal charges are taken from CCD and dimorphite.")
 
 
-            for res, res_start_i in residues_processed_by_hydride:
+            for res in residues_processed_by_hydride:
                 try:
-                    formal_charges, log = residues_processed_by_hydride_formal_charges[res.res_name[0]]
+                    formal_charges, log = residues_processed_by_hydride_formal_charges[res.resname]
                 except KeyError:
                     # zalogovat, že ligand není v CCD, necháváme neutrální
                     continue
@@ -291,20 +315,63 @@ class StructurePreparer:
                 # toto souvisí i s tím, jak budeme nakládat s ligandy, které budou mít menší počet atomů než v CCD, domyslet!
 
 
-                for atom_i, (atom, formal_charge) in enumerate(zip(res, formal_charges), start=res_start_i):
-                    protein.charge[atom_i] = formal_charge
-                    protein.hydride_mask[atom_i] = True
+                for atom, formal_charge in zip(res, formal_charges):
+                    atom.charge_estimation = formal_charge
+                    atom.hydride_mask = True
                 # zalogovat, že ligandu jsou přiřazeny náboje buď podle CCD a nebo podle dimorphite_dl
 
 
-                res_radius =
+                from math import dist
+                res_center = res.center_of_mass(geometric=True)
+                res_radius = max([dist(res_center, atom.coord) for atom in res.get_atoms()])
+                substructure_atoms = kdtree.search(res_center, res_radius + 5, level="A")
+                substructure_atoms.sort(key=lambda x: x.serial_number)
+                selector.full_ids = set([atom.full_id for atom in substructure_atoms])
+                io.save(f"{self.data_dir}/{res.resname}_{res.id[1]}_substructure.pdb", selector)
 
-                # zjisti poloměr ligandu
-                # ulož substrukturu o poloměru poloměr + 5A
-                # načti rdkitem
-                # iteruj nad vazbami a kontroluj zda jsou v hydride
-                # pokud najdeš vazbu která tam není, tak ji přidej
+                rdkit_mol = Chem.MolFromPDBFile(f"{self.data_dir}/{res.resname}_{res.id[1]}_substructure.pdb",
+                                                removeHs=False,
+                                                sanitize=False)
 
+                # přemístit mimo cyklus
+                biotite_bonds_set = set([(a1, a2) for a1, a2 in protein.bonds.as_array()[:, :2]]) # vyřazujeme třetí sloupec s typem vazby
+                rdkit_biotite_bonds_converter = {Chem.BondType.SINGLE: BondType.SINGLE,
+                                                 Chem.BondType.DOUBLE: BondType.DOUBLE}
+
+                for bond in rdkit_mol.GetBonds():
+                    a1 = bond.GetBeginAtomIdx()
+                    a2 = bond.GetEndAtomIdx()
+                    if a1 > a2:
+                        a1, a2 = a2, a1
+                    a1_res_name = rdkit_mol.GetAtomWithIdx(a1).GetPDBResidueInfo().GetResidueName()
+                    a2_res_name = rdkit_mol.GetAtomWithIdx(a2).GetPDBResidueInfo().GetResidueName()
+
+                    if (a1_res_name, a2_res_name).count(res.resname) == 1: # inter-residual bond
+
+                        biopython_a1 = substructure_atoms[a1].serial_number - 1
+                        biopython_a2 = substructure_atoms[a2].serial_number - 1
+
+                        for atom in structure_atoms[biopython_a1].get_parent().get_atoms():
+                            atom.hydride_mask = True
+                        for atom in structure_atoms[biopython_a2].get_parent().get_atoms():
+                            atom.hydride_mask = True
+
+
+                        if (biopython_a1, biopython_a2) not in biotite_bonds_set:
+                            biotite_bond_type = rdkit_biotite_bonds_converter.get(bond.GetBondType(), BondType.ANY)
+                            protein.bonds.add_bond(biopython_a1, biopython_a2, biotite_bond_type)
+                            print(f"added bond!!! {biopython_a1} {biopython_a2} {biotite_bond_type}")
+
+
+                            # log it!
+
+
+
+
+
+
+        protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure.get_atoms()])
+        protein.charge = [atom.charge_estimation for atom in structure.get_atoms()]
 
         bond_array = protein.bonds.as_array()
         unknown_order_mask = bond_array[:, 2] == BondType.ANY
@@ -317,8 +384,7 @@ class StructurePreparer:
         protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=protein.hydride_mask)
         biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_with_hydrogens)
         bond_array = protein_with_hydrogens.bonds.as_array()
-        residue_starts_1, residue_starts_2 = (
-            get_residue_starts_for(protein_with_hydrogens, bond_array[:, :2].flatten()).reshape(-1, 2).T)
+        residue_starts_1, residue_starts_2 = (get_residue_starts_for(protein_with_hydrogens, bond_array[:, :2].flatten()).reshape(-1, 2).T)
         interresidual_bonds = bond_array[residue_starts_1 != residue_starts_2]
         ptnr1_auth_asym_id = []
         ptnr2_auth_asym_id = []
@@ -336,22 +402,6 @@ class StructurePreparer:
         self.biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_seq_id"] = ptnr1_auth_seq_id
         self.biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_seq_id"] = ptnr2_auth_seq_id
 
-        self.label_asym_ids = sorted(set(self.biotite_mmCIF_file.block["atom_site"]["label_asym_id"].as_array()))
-        self.auth_asym_ids = sorted(set(self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"].as_array()))
-        self.one_symbol_chains = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        if len(self.label_asym_ids) > 52 or len(self.auth_asym_ids) > 52:
-            exit(
-                "Number of chains is greater than 52. Moleculekit (pdb2pqr) is not able to add hydrogens to structure.")
-
-        presented_label_asym_id = {key: self.one_symbol_chains[index] for index, key in enumerate(self.label_asym_ids)}
-        presented_auth_asym_id = {key: self.one_symbol_chains[index] for index, key in enumerate(self.auth_asym_ids)}
-        self.biotite_mmCIF_file.block["atom_site"]["label_asym_id"] = [presented_label_asym_id[key] for key in
-                                                                       self.biotite_mmCIF_file.block["atom_site"][
-                                                                           "label_asym_id"].as_array()]
-        self.biotite_mmCIF_file.block["atom_site"]["auth_asym_id"] = [presented_auth_asym_id[key] for key in
-                                                                      self.biotite_mmCIF_file.block["atom_site"][
-                                                                          "auth_asym_id"].as_array()]
-
         self.biotite_mmCIF_file.write(f"{self.data_dir}/hydride.cif")
         # these three lines can be probably removed, after biotite 1.0.2 will be released
         mmcif_string = open(f"{self.data_dir}/hydride.cif").read()
@@ -361,15 +411,39 @@ class StructurePreparer:
 
     def add_hydrogens_by_moleculekit(self):
         print("Adding hydrogens by moleculekit... ", end="")
-        molecule = molit.Molecule(f"{self.data_dir}/hydride.cif")
+        label_asym_ids_map, auth_asym_ids_map = change_chain_names(f"{self.data_dir}/hydride.cif",
+                                                                   f"{self.data_dir}/hydride_changed_chains.cif")
+
+
+        molecule = molit.Molecule(f"{self.data_dir}/hydride_changed_chains.cif")
+
+
         prepared_molecule = systemPrepare(molecule,
                                           pH=self.pH,
+                                          hold_nonpeptidic_bonds=True,
                                           ignore_ns_errors=True,
                                           _molkit_ff=False)
-        prepared_molecule.write(f"{self.data_dir}/moleculekit.cif")
+        prepared_molecule.write(f"{self.data_dir}/moleculekit_changed_chains.cif")
+
+        moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/moleculekit_changed_chains.cif")
+        hydride_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/hydride_changed_chains.cif")
+        self.biotite_mmCIF_file.block["atom_site"] = moleculekit_mmCIF_file.block["atom_site"]
+        self.biotite_mmCIF_file.block["struct_conn"] = hydride_mmCIF_file.block["struct_conn"]
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/moleculekit_changed_chains.cif")
+        # these three lines can be probably removed, after biotite 1.0.2 will be released
+        mmcif_string = open(f"{self.data_dir}/moleculekit_changed_chains.cif").read()
+        repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        open(f"{self.data_dir}/moleculekit_changed_chains.cif", "w").write(repaired_mmcif_string)
+
+        change_chain_names(f"{self.data_dir}/moleculekit_changed_chains.cif",
+                           f"{self.data_dir}/moleculekit.cif",
+                           label_asym_ids_map,
+                           auth_asym_ids_map)
+
+
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
         if all(chg == 0 for chg in pdb2pqr_charges):
-            exit("ERROR! Moleculekit is not modified!")
+            print("Warning! Moleculekit is probably not modified!")
             # Modification of moleculekit:
             # .../moleculekit/tools/preparation.py
             #  line 827 ("ffcharge", "charge")
@@ -387,3 +461,4 @@ class StructurePreparer:
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/moleculekit.cif", "w").write(repaired_mmcif_string)
         print("ok")
+        exit()

@@ -34,6 +34,9 @@ def load_arguments():
 if __name__ == "__main__":
     args = load_arguments()
 
+    # check number of chains
+    # Number of chains is greater than 52. Moleculekit (pdb2pqr) is not able to add hydrogens to structure.
+
     # prepare directories to store data
     system(f"mkdir {args.data_dir}; "
            f"mkdir {args.data_dir}/input_mmCIF; "
