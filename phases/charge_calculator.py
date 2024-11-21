@@ -1,18 +1,24 @@
 import argparse
 from math import dist
 from os import path, system
-from .atom_selector import AtomSelector
 
 import gemmi
 from Bio import PDB
 from rdkit import Chem
 
 
+
+class AtomSelector(PDB.Select):
+    def accept_atom(self, atom):
+        return int(atom.full_id in self.full_ids)
+
+
+
 def load_arguments():
     print("\nParsing arguments... ", end="")
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mmCIF_file",
-                        help="mmCIF file with protein structure.",
+    parser.add_argument("--PDB_file",
+                        help="PDB file with protein structure.",
                         type=str,
                         required=True)
     parser.add_argument("--data_dir",
@@ -24,26 +30,33 @@ def load_arguments():
                              "the auxiliary files will be continuously deleted during the calculation.",
                         action="store_true")
     args = parser.parse_args()
-    if not path.isfile(args.mmCIF_file):
-        exit(f"\nERROR! File {args.mmCIF_file} does not exist!\n")
+    if not path.isfile(args.PDB_file):
+        exit(f"\nERROR! File {args.PDB_file} does not exist!\n")
     if path.exists(args.data_dir):
         exit(f"\nError! Directory with name {args.data_dir} exists. "
              f"Remove existed directory or change --data_dir argument!\n")
     print("ok")
+    #TODO argument pro estimation, kontrola, zda existuje
     return args
 
 
 class ChargeCalculator:
+    """
+    TODO
+    """
     def __init__(self,
-                 mmCIF_file: str,
+                 PDB_file: str,
+                 charges_estimation: str,
                  data_dir: str,
                  delete_auxiliary_files: bool):
         """
-        :param mmCIF_file: mmCIF file containing the structure for which the partial atomic charges are to be calculated
+        :param PDB_file: PDB file containing the structure for which the partial atomic charges are to be calculated
+        :param charges_estimation TODO
         :param data_dir: directory where the results will be stored
         :param delete_auxiliary_files: auxiliary files created by the calculation taking up a significant amount of space will be deleted
         """
-        self.mmCIF_file = mmCIF_file
+        self.PDB_file = PDB_file
+        self.charges_estimation = charges_estimation
         self.data_dir = data_dir
         self.delete_auxiliary_files = delete_auxiliary_files
         system(f"mkdir {self.data_dir}")
@@ -51,8 +64,8 @@ class ChargeCalculator:
     def calculate_charges(self):
         print("Calculating of charges... ", end="")
 
-        # load structure by biopython
-        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", self.mmCIF_file)[0]
+        # load structure by Biopython
+        structure = PDB.PDBParser(QUIET=True).get_structure("structure", self.PDB_file)[0]
         structure_atoms = list(structure.get_atoms())
         structure_num_of_atoms = len(structure_atoms)
         selector = AtomSelector()
@@ -60,14 +73,14 @@ class ChargeCalculator:
         io.set_structure(structure)
         kdtree = PDB.NeighborSearch(structure_atoms)
 
-        # load partial atomic charges estimation from mmCIF file
-        try:
-            charge_estimations = gemmi.cif.read_file(self.mmCIF_file).sole_block().find_mmcif_category('_atom_site.').find_column("charge_estimation")
-            charge_estimations = [float(x) for x in charge_estimations]
-        except RuntimeError: # charge estimation is not in mmCIF file
+        # load partial atomic charges estimation
+        if self.charges_estimation:
+            with open(self.charges_estimation, "r") as estimated_charges_file:
+                charge_estimations = [float(x) for x in estimated_charges_file.readlines()[1].split()]
+        else:
             charge_estimations = [0 for _ in range(structure_num_of_atoms)]
 
-        # creating charge attributes to make them easy to work with in biopython library
+        # creating charge attributes to make them easy to work with in Biopython library
         for atom, atomic_charge_estimation in zip(structure_atoms, charge_estimations):
             atom.charge_estimation = atomic_charge_estimation
             atom.cm5_charge = None
@@ -80,6 +93,8 @@ class ChargeCalculator:
 
         # calculate the charges for each atom using the cutoff approach.
         for calculated_atom_i, calculated_atom in enumerate(structure_atoms):
+
+            print(calculated_atom_i)
 
             # To speed up the calculation, the charges of the hydrogen and oxygen atoms bound to one atom
             # are calculated together with the nearest other heavy atoms
@@ -100,7 +115,7 @@ class ChargeCalculator:
             selector.full_ids = set([atom.full_id for atom in atoms_in_max_radius])
             io.save(f"{substructure_data_dir}/atoms_in_{max_radius}_angstroms.pdb", selector)
 
-            # load substructures by rdkit to determine bonds
+            # load substructures by RDKit to determine bonds
             mol_min_radius = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_in_{min_radius}_angstroms.pdb", removeHs=False, sanitize=False)
             mol_min_radius_conformer = mol_min_radius.GetConformer()
             mol_max_radius = Chem.MolFromPDBFile(f"{substructure_data_dir}/atoms_in_{max_radius}_angstroms.pdb", removeHs=False, sanitize=False)
@@ -142,7 +157,7 @@ class ChargeCalculator:
                             atoms_with_broken_bonds.append(bonded_atom)
                             substructure_coord_dict[(coord.x, coord.y, coord.z)] = bonded_atom
 
-            # create substructure in biopython library
+            # create substructure in Biopython library
             substructure_atoms = []
             for coord in substructure_coord_dict.keys():
                 substructure_atoms.append(kdtree.search(coord, 0.1, level="A")[0])
@@ -186,7 +201,7 @@ class ChargeCalculator:
                         calculated_atoms.add(near_atom)
             calculated_atoms_full_ids = set([calculated_atom.full_id for calculated_atom in calculated_atoms])
 
-            # write the charges into the biopython structure
+            # write the charges into the Biopython structure
             for substructure_index, substructure_atom in enumerate(substructure_atoms):
                 if substructure_atom.full_id in calculated_atoms_full_ids:
                     charge = float(xtb_output_file_lines[charge_headline_index + substructure_index + 1].split()[3])
@@ -201,9 +216,10 @@ class ChargeCalculator:
     def write_charges_to_files(self):
         print("Writing charges to file... ", end="")
         with open(f"{self.data_dir}/charges.txt", "w") as charges_file:
-            charges_string = f"{path.basename(self.mmCIF_file)[:-4]}\n" + " ".join([str(x) for x in self.cm5_charges])
+            charges_string = f"{path.basename(self.PDB_file)[:-4]}\n" + " ".join([str(x) for x in self.cm5_charges])
             charges_file.write(charges_string)
 
+        exit()
         # write charges to mmCIF file
         structure = gemmi.cif.read_file(self.mmCIF_file)
         block = structure.sole_block()
@@ -237,7 +253,7 @@ class ChargeCalculator:
 
 if __name__ == "__main__":
     args = load_arguments()
-    calculator = ChargeCalculator(mmCIF_file=args.mmCIF_file,
+    calculator = ChargeCalculator(PDB_file=args.PDB_file,
                                   data_dir=args.data_dir,
                                   delete_auxiliary_files=args.delete_auxiliary_files)
     calculator.calculate_charges()

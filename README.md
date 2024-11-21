@@ -9,16 +9,12 @@ openbabel 3.1.1       # conda install conda-forge::openbabel=3.1.1
 pdb2pqr 3.6.1         # conda install conda-forge::pdb2pqr=3.6.1
 numpy 1.26.4          # conda install numpy=1.26.4
 xtb 6.6.1             # conda install conda-forge::xtb=6.6.1
+pdbfixer 1.10         # conda install conda-forge::pdbfixer=1.10
 
 dimorphite_dl 1.3.2   # pip install dimorphite_dl==1.3.2
-hydride 1.2.2         # pip install hydride==1.2.2
+hydride 1.2.3         # pip install hydride==1.2.3
 biopython 1.84        # pip install biopython==1.84
 
-
-knihovnu pdbfixer je potřeba nainstalovat přímo z gitu. 
-git clone https://github.com/openmm/pdbfixer
-cd pdbfixer
-python setup.py install
 
 je potřeba upravit moleculekit
 v souboru miniconda3/lib/python3.11/site-packages/moleculekit/tools/preparation.py 
