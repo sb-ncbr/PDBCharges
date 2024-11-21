@@ -44,12 +44,20 @@ def change_chain_names(mmCIF_file: str,
         auth_asym_ids_map = {key: allowed_chain_names[index] for index, key in enumerate(sorted(set(auth_asym_ids)))}
 
     biotite_mmCIF_file.block["atom_site"]["label_asym_id"] = [label_asym_ids_map[key] for key in label_asym_ids]
-    biotite_mmCIF_file.block["struct_conn"]["ptnr1_label_asym_id"] = [label_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr1_label_asym_id"].as_array()]
-    biotite_mmCIF_file.block["struct_conn"]["ptnr2_label_asym_id"] = [label_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr2_label_asym_id"].as_array()]
+    try:
+        biotite_mmCIF_file.block["struct_conn"]["ptnr1_label_asym_id"] = [label_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr1_label_asym_id"].as_array()]
+        biotite_mmCIF_file.block["struct_conn"]["ptnr2_label_asym_id"] = [label_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr2_label_asym_id"].as_array()]
+    except KeyError:
+        pass
+
 
     biotite_mmCIF_file.block["atom_site"]["auth_asym_id"] = [auth_asym_ids_map[key] for key in auth_asym_ids]
-    biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"] = [auth_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"].as_array()]
-    biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"] = [auth_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"].as_array()]
+    try:
+
+        biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"] = [auth_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr1_auth_asym_id"].as_array()]
+        biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"] = [auth_asym_ids_map[key] for key in biotite_mmCIF_file.block["struct_conn"]["ptnr2_auth_asym_id"].as_array()]
+    except KeyError:
+        pass
 
 
 

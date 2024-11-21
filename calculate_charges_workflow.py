@@ -50,7 +50,7 @@ if __name__ == "__main__":
     structure_preparer.add_hydrogens_by_hydride()  # add hydrogens to the residues that the moleculekit can't process
     structure_preparer.add_hydrogens_by_moleculekit()  # add hydrogens to rest of structure
 
-    calculator = ChargeCalculator(mmCIF_file=f"{args.data_dir}/structure_preparer/moleculekit.cif",
+    calculator = ChargeCalculator(mmCIF_file=f"{args.data_dir}/structure_preparer/combined.cif",
                                   data_dir=f"{args.data_dir}/charges_calculator",
                                   delete_auxiliary_files=args.delete_auxiliary_files)
     calculator.calculate_charges()

@@ -72,14 +72,17 @@ class StructurePreparer:
         fixer = PDBFixer(filename=self.mmCIF_file)
         set_of_resnames = set([x.name for x in fixer.topology.residues()])
 
-        # download templates for heteroresidues
-        fixer_available_resnames = set(fixer.templates.keys())
-        for resname in set_of_resnames:
-            if resname not in fixer_available_resnames:
-                try:
-                    fixer.downloadTemplate(resname)
-                except:
-                    exit(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
+
+        # napsat komentář, proč to neděláme!
+
+        # # download templates for heteroresidues
+        # fixer_available_resnames = set(fixer.templates.keys())
+        # for resname in set_of_resnames:
+        #     if resname not in fixer_available_resnames:
+        #         try:
+        #             fixer.downloadTemplate(resname)
+        #         except:
+        #             exit(f"ERROR! Old version of pdbfixer installed or heteroresiduum {resname} does not exist!")
 
         # add heavy atoms
         fixer.missingResidues = {}
@@ -117,6 +120,8 @@ class StructurePreparer:
         mmcif_string = open(f"{self.data_dir}/without_hydrogens.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/without_hydrogens.cif", "w").write(repaired_mmcif_string)
+
+
         print("ok")
 
 
@@ -208,18 +213,31 @@ class StructurePreparer:
         # shortcuts for RNA, also processed by pdb2pqr, defined in RNA_MAPPING
         residues_processed_by_pdb2pqr.update(["A", "C", "G", "U"])
 
-        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/without_hydrogens.cif")[0]
+        self.label_asym_ids_map, self.auth_asym_ids_map = change_chain_names(f"{self.data_dir}/without_hydrogens.cif",
+                                                                             f"{self.data_dir}/without_hydrogens_m.cif")
+        asdf = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/without_hydrogens_m.cif")
+        self.biotite_mmCIF_file.block["atom_site"] = asdf.block["atom_site"]
+
+
+
+
+        structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/without_hydrogens_m.cif")[0]
+
         structure_atoms = list(structure.get_atoms())
-        structure_num_of_atoms = len(structure_atoms)
+        structure_atoms.sort(key=lambda x: x.serial_number)
         selector = AtomSelector()
         io = PDB.PDBIO()
         io.set_structure(structure)
         kdtree = PDB.NeighborSearch(structure_atoms)
         for atom in structure_atoms:
             atom.charge_estimation = 0
+            atom.charged_by_dimorphite = False
             atom.hydride_mask = False
 
         residues_processed_by_hydride = [res for res in structure.get_residues() if res.resname not in residues_processed_by_pdb2pqr]
+
+        residues_protonated_by_hydride = set() # špatně, popsat rozdíl mezi processed a protonated
+
         # todo!! je to tak správně? titruje je propka?
 
 
@@ -232,7 +250,6 @@ class StructurePreparer:
         #     print(biopython_atom.full_id, biotite_atom)
         # exit()
 
-
         if residues_processed_by_hydride:
             # load formal charges for ligand from CCD. Add other formal charges by dimorphite
             dimorphite = DimorphiteDL(min_ph=self.pH,
@@ -241,7 +258,6 @@ class StructurePreparer:
                                       label_states=False,
                                       pka_precision=0.001)
             residues_processed_by_hydride_names = set([res.resname for res in residues_processed_by_hydride])
-            # residues_processed_by_hydride_names = set([res.res_name[0] for res, _ in residues_processed_by_hydride])
             residues_processed_by_hydride_formal_charges = {}
             for CCD_mol_sdf in open("CCD/Components-pub.sdf", "r").read().split("$$$$\n"):
                 mol_name = CCD_mol_sdf.partition("\n")[0]
@@ -254,71 +270,94 @@ class StructurePreparer:
                                                                                   "The structure cannot be loaded by RDKit.")
                     else:
                         CCD_mol = Chem.RemoveAllHs(CCD_mol)
-                        CCD_mol_formal_charges = [atom.GetFormalCharge() for atom in CCD_mol.GetAtoms()]
                         CCD_mol_smiles = Chem.MolToSmiles(CCD_mol)
                         dimorphite_smiles = dimorphite.protonate(CCD_mol_smiles)[0]
                         dimorphite_mol = Chem.MolFromSmiles(dimorphite_smiles)
                         dimorphite_mol = Chem.RemoveAllHs(dimorphite_mol)
                         params = rdFMCS.MCSParameters()
                         params.AtomTyper = rdFMCS.AtomCompare.CompareElements
-                        params.BondTyper = rdFMCS.BondCompare.CompareOrder
+                        params.BondTyper = rdFMCS.BondCompare.CompareOrder # fakt? Jakto že to funguje? Testnout ješte jednou!
                         params.BondCompareParameters.RingMatchesRingOnly = True
                         params.BondCompareParameters.CompleteRingsOnly = True
                         params.AtomCompareParameters.MatchFormalCharge = False
                         params.Timeout = 60
                         res = rdFMCS.FindMCS([CCD_mol, dimorphite_mol], params)
                         atom_indices_map = [x[1] for x in
-                                            sorted(list(zip(dimorphite_mol.GetSubstructMatch(res.queryMol),
-                                                            CCD_mol.GetSubstructMatch(res.queryMol))))]
+                                            sorted(zip(dimorphite_mol.GetSubstructMatch(res.queryMol),
+                                                            CCD_mol.GetSubstructMatch(res.queryMol)))]
                         if len(dimorphite_mol.GetAtoms()) != len(atom_indices_map):
-                            residues_processed_by_hydride_formal_charges[mol_name] = (CCD_mol_formal_charges,
+                            residues_processed_by_hydride_formal_charges[mol_name] = (CCD_mol,
                                                                                       "Atom mapping of structures from CCD and dimorphite failed. The formal charges are taken from the CCD.")
                         else:
-                            dimorphite_formal_charges = [0 for _ in dimorphite_mol.GetAtoms()]
+                            dimorphite_formal_charges = [0 for _ in dimorphite_mol.GetAtoms()] # přepsat na generátor
                             for atom, a_i in zip(dimorphite_mol.GetAtoms(), atom_indices_map):
                                 dimorphite_formal_charges[a_i] = atom.GetFormalCharge()
-                            combined_charges = []
-                            for CCD_atom, CCD_formal_charge, dimorphite_formal_charge in zip(CCD_mol.GetAtoms(),
-                                                                                             CCD_mol_formal_charges,
-                                                                                             dimorphite_formal_charges):
-                                if CCD_formal_charge != 0:
-                                    combined_charges.append(CCD_formal_charge)
-                                elif dimorphite_formal_charge != 0:
+
+                            for CCD_atom in CCD_mol.GetAtoms():
+                                CCD_atom.SetProp("ChargedByDimorphite", "0")
+
+                            for CCD_atom, dimorphite_formal_charge in zip(CCD_mol.GetAtoms(),
+                                                                          dimorphite_formal_charges):
+
+                                if CCD_atom.GetFormalCharge() == 0 and dimorphite_formal_charge != 0:
                                     bonded_atoms = list(CCD_atom.GetNeighbors())
                                     bonded_atoms_over_two_bonds = []
                                     for bonded_atom in bonded_atoms:
                                         bonded_atoms_over_two_bonds.extend(bonded_atom.GetNeighbors())
                                     if all([atom.GetFormalCharge() == 0 for atom in
                                             bonded_atoms + bonded_atoms_over_two_bonds]):  # CCD_atom is already in bonded_atoms_over_two_bonds
-                                        combined_charges.append(dimorphite_formal_charge)
-                                    else:
-                                        combined_charges.append(0)
-                                else:
-                                    combined_charges.append(0)
-                            residues_processed_by_hydride_formal_charges[mol_name] = (combined_charges,
+                                        CCD_atom.SetProp("ChargedByDimorphite", "1")
+                                        CCD_atom.SetFormalCharge(dimorphite_formal_charge)
+
+                            residues_processed_by_hydride_formal_charges[mol_name] = (CCD_mol,
                                                                                       "The formal charges are taken from CCD and dimorphite.")
 
-
             for res in residues_processed_by_hydride:
+                residues_protonated_by_hydride.add(res)
+
                 try:
-                    formal_charges, log = residues_processed_by_hydride_formal_charges[res.resname]
+                    CCD_mol, log = residues_processed_by_hydride_formal_charges[res.resname]
                 except KeyError:
                     # zalogovat, že ligand není v CCD, necháváme neutrální
+                    print("DIVNY ERROR!!!")
                     continue
+
+
+
                 # logovat podle logu! 1) není načetnutelný, nešlo dimorphite, šlo dimorphite
-
-                if len(res) != len(formal_charges):
-                    # zalogovat, že ligand má jiný počet atomů než v CCD, necháváme neutrální, protonuje hydride
-                    continue
-
-                # kontrolovat pořadí!!! TODO
-                # toto souvisí i s tím, jak budeme nakládat s ligandy, které budou mít menší počet atomů než v CCD, domyslet!
+                # logovat zda sedí počet atomů!
+                # if len(res) != len(formal_charges):
+                #     # zalogovat, že ligand má jiný počet atomů než v CCD, necháváme neutrální, protonuje hydride
 
 
-                for atom, formal_charge in zip(res, formal_charges):
-                    atom.charge_estimation = formal_charge
-                    atom.hydride_mask = True
+                # ulož reziduum do substruktury
+                res_atoms = [atom for atom in res.get_atoms()]
+                res_atoms.sort(key=lambda x: x.serial_number)
+                selector.full_ids = set([atom.full_id for atom in res_atoms])
+                io.save(f"{self.data_dir}/{res.resname}_{res.id[1]}.pdb", selector)
+                rdkit_mol = Chem.MolFromPDBFile(f"{self.data_dir}/{res.resname}_{res.id[1]}.pdb",
+                                                removeHs=False,
+                                                sanitize=False)
+                rdkit_mol = Chem.RemoveAllHs(rdkit_mol)
+
+                params = rdFMCS.MCSParameters()
+                params.AtomTyper = rdFMCS.AtomCompare.CompareElements
+                params.BondTyper = rdFMCS.BondCompare.CompareAny  # fakt?
+                # params.BondCompareParameters.RingMatchesRingOnly = True # fakt?
+                # params.BondCompareParameters.CompleteRingsOnly = True # fakt?
+                params.AtomCompareParameters.MatchFormalCharge = False
+                params.Timeout = 60
+                resss = rdFMCS.FindMCS([rdkit_mol, CCD_mol], params)
+                atom_indices_map = {x[0]:x[1] for x in
+                                    sorted(zip(rdkit_mol.GetSubstructMatch(resss.queryMol), CCD_mol.GetSubstructMatch(resss.queryMol)))}
+
+                #if len(map) != len(res): log it!, continue
+
+                for atom_i, atom in enumerate(res.get_atoms()):
+                    atom.charge_estimation = CCD_mol.GetAtoms()[atom_indices_map[atom_i]].GetFormalCharge()
+                    atom.charged_by_dimorphite = bool(int(CCD_mol.GetAtoms()[atom_indices_map[atom_i]].GetProp("ChargedByDimorphite")))
                 # zalogovat, že ligandu jsou přiřazeny náboje buď podle CCD a nebo podle dimorphite_dl
+
 
 
                 from math import dist
@@ -327,51 +366,74 @@ class StructurePreparer:
                 substructure_atoms = kdtree.search(res_center, res_radius + 5, level="A")
                 substructure_atoms.sort(key=lambda x: x.serial_number)
                 selector.full_ids = set([atom.full_id for atom in substructure_atoms])
-                io.save(f"{self.data_dir}/{res.resname}_{res.id[1]}_substructure.pdb", selector)
+                io.save(f"{self.data_dir}/{res.resname}_{res.id[1]}_substructure.pdb", selector, preserve_atom_numbering=True) # možná změnit res.id[1]
 
                 rdkit_mol = Chem.MolFromPDBFile(f"{self.data_dir}/{res.resname}_{res.id[1]}_substructure.pdb",
                                                 removeHs=False,
                                                 sanitize=False)
 
                 # přemístit mimo cyklus
-                biotite_bonds_set = set([(a1, a2) for a1, a2 in protein.bonds.as_array()[:, :2]]) # vyřazujeme třetí sloupec s typem vazby
+                biotite_bonds_set = set([frozenset((a1, a2)) for a1, a2 in protein.bonds.as_array()[:, :2]]) # vyřazujeme třetí sloupec s typem vazby
                 rdkit_biotite_bonds_converter = {Chem.BondType.SINGLE: BondType.SINGLE,
                                                  Chem.BondType.DOUBLE: BondType.DOUBLE}
 
                 for bond in rdkit_mol.GetBonds():
-                    a1 = bond.GetBeginAtomIdx()
-                    a2 = bond.GetEndAtomIdx()
-                    if a1 > a2:
-                        a1, a2 = a2, a1
-                    a1_res_name = rdkit_mol.GetAtomWithIdx(a1).GetPDBResidueInfo().GetResidueName()
-                    a2_res_name = rdkit_mol.GetAtomWithIdx(a2).GetPDBResidueInfo().GetResidueName()
+                    ba1_serial_number = bond.GetBeginAtom().GetPDBResidueInfo().GetSerialNumber()
+                    ba2_serial_number = bond.GetEndAtom().GetPDBResidueInfo().GetSerialNumber()
+                    ba1_index = ba1_serial_number - 1
+                    ba2_index = ba2_serial_number - 1
+                    ba1 = structure_atoms[ba1_index]
+                    ba2 = structure_atoms[ba2_index]
+                    ba1_res = ba1.get_parent()
+                    ba2_res = ba2.get_parent()
 
-                    if (a1_res_name, a2_res_name).count(res.resname) == 1: # inter-residual bond
+                    if ba1_res != ba2_res and res in (ba1_res, ba2_res): # inter-residual bond
 
-                        biopython_a1 = substructure_atoms[a1].serial_number - 1
-                        biopython_a2 = substructure_atoms[a2].serial_number - 1
+                        # nastav nulový náboj pro struktury v peptidové vazbě
+                        # toto platí jak pro CCD tak pro dimorphite
+                        if set([ba1.element, ba2.element]) == {"N", "C"}:
+                            carbon = [atom for atom in [ba1, ba2] if atom.element == "C"][0]
+                            if "O" in [atom.element for atom in kdtree.search(carbon.coord, 1.3, level="A")]:
+                                ba1.charge_estimation = 0
+                                ba2.charge_estimation = 0
 
-                        for atom in structure_atoms[biopython_a1].get_parent().get_atoms():
-                            atom.hydride_mask = True
-                        for atom in structure_atoms[biopython_a2].get_parent().get_atoms():
-                            atom.hydride_mask = True
+                        # nastav nulový náboj pro dimorphite
+                        if ba1.charged_by_dimorphite:
+                            ba1.charge_estimation = 0
+                        if ba2.charged_by_dimorphite:
+                            ba2.charge_estimation = 0
 
 
-                        if (biopython_a1, biopython_a2) not in biotite_bonds_set:
+
+
+                        if frozenset((ba1_index, ba1_index)) not in biotite_bonds_set:
                             biotite_bond_type = rdkit_biotite_bonds_converter.get(bond.GetBondType(), BondType.ANY)
-                            protein.bonds.add_bond(biopython_a1, biopython_a2, biotite_bond_type)
-                            print(f"added bond!!! {biopython_a1} {biopython_a2} {biotite_bond_type}")
-
-
+                            protein.bonds.add_bond(ba1_index, ba2_index, biotite_bond_type)
+                            print(f"added bond!!! {ba1_index} {ba2_index} {biotite_bond_type}")
                             # log it!
 
+                        residues_protonated_by_hydride.update({ba1_res, ba2_res})
+
+        for res in residues_protonated_by_hydride:
+            for atom in res.get_atoms():
+                atom.hydride_mask = True
+
+
+        protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure_atoms])
+
+
+        hydride_estimated_charges = hydride.estimate_amino_acid_charges(protein, ph=self.pH)
+        for atom, hydride_estimated_charge in zip(structure_atoms, hydride_estimated_charges):
+            if atom.hydride_mask and atom.charge_estimation == 0:
+                atom.charge_estimation = hydride_estimated_charge
 
 
 
 
 
-        protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure.get_atoms()])
-        protein.charge = [atom.charge_estimation for atom in structure.get_atoms()]
+
+        protein.charge = [atom.charge_estimation for atom in structure_atoms]
+
 
         bond_array = protein.bonds.as_array()
         unknown_order_mask = bond_array[:, 2] == BondType.ANY
@@ -382,6 +444,12 @@ class StructurePreparer:
 
 
         protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=protein.hydride_mask)
+
+        self.hydride_charges = protein_with_hydrogens.charge
+        self.hydride_mask = protein_with_hydrogens.hydride_mask
+
+
+
         biotite_mmCIF.set_structure(self.biotite_mmCIF_file, protein_with_hydrogens)
         bond_array = protein_with_hydrogens.bonds.as_array()
         residue_starts_1, residue_starts_2 = (get_residue_starts_for(protein_with_hydrogens, bond_array[:, :2].flatten()).reshape(-1, 2).T)
@@ -409,24 +477,22 @@ class StructurePreparer:
         open(f"{self.data_dir}/hydride.cif", "w").write(repaired_mmcif_string)
         print("ok")
 
+
     def add_hydrogens_by_moleculekit(self):
         print("Adding hydrogens by moleculekit... ", end="")
-        label_asym_ids_map, auth_asym_ids_map = change_chain_names(f"{self.data_dir}/hydride.cif",
-                                                                   f"{self.data_dir}/hydride_changed_chains.cif")
 
-
-        molecule = molit.Molecule(f"{self.data_dir}/hydride_changed_chains.cif")
+        molecule = molit.Molecule(f"{self.data_dir}/hydride.cif")
 
 
         prepared_molecule = systemPrepare(molecule,
                                           pH=self.pH,
-                                          hold_nonpeptidic_bonds=True,
+                                          hold_nonpeptidic_bonds=False,
                                           ignore_ns_errors=True,
-                                          _molkit_ff=False)
+                                          _molkit_ff=False) # todo
         prepared_molecule.write(f"{self.data_dir}/moleculekit_changed_chains.cif")
 
         moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/moleculekit_changed_chains.cif")
-        hydride_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/hydride_changed_chains.cif")
+        hydride_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/hydride.cif")
         self.biotite_mmCIF_file.block["atom_site"] = moleculekit_mmCIF_file.block["atom_site"]
         self.biotite_mmCIF_file.block["struct_conn"] = hydride_mmCIF_file.block["struct_conn"]
         self.biotite_mmCIF_file.write(f"{self.data_dir}/moleculekit_changed_chains.cif")
@@ -435,13 +501,49 @@ class StructurePreparer:
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
         open(f"{self.data_dir}/moleculekit_changed_chains.cif", "w").write(repaired_mmcif_string)
 
-        change_chain_names(f"{self.data_dir}/moleculekit_changed_chains.cif",
-                           f"{self.data_dir}/moleculekit.cif",
-                           label_asym_ids_map,
-                           auth_asym_ids_map)
-
 
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
+
+
+        hydride_structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/hydride.cif")[0]
+        for atom, hydride_charge, hydride_mask in zip(hydride_structure.get_atoms(), self.hydride_charges, self.hydride_mask):
+            atom.charge_estimation = hydride_charge
+            atom.hydride_mask = hydride_mask
+
+
+
+        # structure which combine hydrogens and charges from hydride and moleculekit
+        combined_structure = PDB.MMCIFParser(QUIET=True).get_structure("structure", f"{self.data_dir}/moleculekit_changed_chains.cif")[0]
+        for atom, moleculekit_charge in zip(combined_structure.get_atoms(), pdb2pqr_charges):
+            atom.charge_estimation = moleculekit_charge
+
+        for h_chain, c_chain in zip(sorted(hydride_structure), sorted(combined_structure)):
+            for res_i, (h_res, c_res) in enumerate(zip(h_chain, c_chain)):
+                if h_res.full_id != c_res.full_id:
+                    exit(f"ERROR {h_res.full_id} {c_res.full_id}")
+                if any([atom.hydride_mask for atom in h_res]):
+                    combined_structure[c_chain.id].detach_child(c_res.id)
+                    combined_structure[c_chain.id].insert(res_i, h_res)
+                    # log
+                else:
+                    pass
+                    # also log
+
+
+
+
+        io = PDB.MMCIFIO()
+        io.set_structure(combined_structure)
+        io.save(f"{self.data_dir}/combined.cif", preserve_atom_numbering=True)
+        exit()
+
+
+        change_chain_names(f"{self.data_dir}/combined.cif",
+                           f"{self.data_dir}/combined2.cif",
+                           self.label_asym_ids_map,
+                           self.auth_asym_ids_map)
+        exit()
+
         if all(chg == 0 for chg in pdb2pqr_charges):
             print("Warning! Moleculekit is probably not modified!")
             # Modification of moleculekit:
@@ -451,14 +553,24 @@ class StructurePreparer:
 
         # print(sum(pdb2pqr_charges)) # jakto že je to takto divné? todo dopsat warning!
 
-        moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/moleculekit.cif")
+        # moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/moleculekit.cif")
+        # self.biotite_mmCIF_file.block["atom_site"] = moleculekit_mmCIF_file.block["atom_site"]
+        # if self.save_charges_estimation:
+        #     self.biotite_mmCIF_file.block["atom_site"]["charge_estimation"] = [round(charge, 4) for charge in pdb2pqr_charges + prepared_molecule.formalcharge]
+        # self.biotite_mmCIF_file.write(f"{self.data_dir}/moleculekit.cif")
+        # # these three lines can be probably removed, after biotite 1.0.2 will be released
+        # mmcif_string = open(f"{self.data_dir}/moleculekit.cif").read()
+        # repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
+        # open(f"{self.data_dir}/moleculekit.cif", "w").write(repaired_mmcif_string)
+        # print("ok")
+
+        moleculekit_mmCIF_file = biotite_mmCIF.CIFFile.read(f"{self.data_dir}/combined.cif")
         self.biotite_mmCIF_file.block["atom_site"] = moleculekit_mmCIF_file.block["atom_site"]
         if self.save_charges_estimation:
             self.biotite_mmCIF_file.block["atom_site"]["charge_estimation"] = [round(charge, 4) for charge in pdb2pqr_charges + prepared_molecule.formalcharge]
-        self.biotite_mmCIF_file.write(f"{self.data_dir}/moleculekit.cif")
+        self.biotite_mmCIF_file.write(f"{self.data_dir}/combined.cif")
         # these three lines can be probably removed, after biotite 1.0.2 will be released
-        mmcif_string = open(f"{self.data_dir}/moleculekit.cif").read()
+        mmcif_string = open(f"{self.data_dir}/combined.cif").read()
         repaired_mmcif_string = mmcif_string.replace("\n# ", "\n# \n")
-        open(f"{self.data_dir}/moleculekit.cif", "w").write(repaired_mmcif_string)
+        open(f"{self.data_dir}/combined.cif", "w").write(repaired_mmcif_string)
         print("ok")
-        exit()
