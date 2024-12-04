@@ -34,25 +34,34 @@ def load_arguments():
 if __name__ == "__main__":
     args = load_arguments()
 
-    # check number of chains
-    # Number of chains is greater than 52. Moleculekit (pdb2pqr) is not able to add hydrogens to structure.
-
     # prepare directories to store data
     system(f"mkdir {args.data_dir}; "
            f"mkdir {args.data_dir}/input_PDB; "
            f"cp {args.PDB_file} {args.data_dir}/input_PDB")
 
-    structure_preparer = StructurePreparer(PDB_file=args.PDB_file,
-                                           data_dir=f"{args.data_dir}/structure_preparer",
-                                           delete_auxiliary_files=args.delete_auxiliary_files)
-    structure_preparer.fix_structure()  # fix structure by PDBFixer
+    # prepare structure for main calculation of partial atomic charges
+    structure_preparer_input = args.PDB_file
+    structure_preparer_data_directory = f"{args.data_dir}/structure_preparer"
+    structure_preparer_output = f"{path.basename(args.PDB_file)[:-4]}_prepared.cif"
+    structure_preparer = StructurePreparer(input_PDB_file=structure_preparer_input,
+                                           data_dir=structure_preparer_data_directory,
+                                           output_mmCIF_file=structure_preparer_output,
+                                           delete_auxiliary_files=args.delete_auxiliary_files,
+                                           save_charges_estimation=True)
+    structure_preparer.fix_structure()
     structure_preparer.remove_hydrogens()
-    structure_preparer.add_hydrogens_by_hydride()  # add hydrogens to the residues that the moleculekit can't process
-    structure_preparer.add_hydrogens_by_moleculekit()  # add hydrogens to rest of structure
+    structure_preparer.add_hydrogens_by_hydride()
+    structure_preparer.add_hydrogens_by_moleculekit()
 
-    calculator = ChargeCalculator(PDB_file=f"{args.data_dir}/structure_preparer/prepared.pdb",
-                                  charges_estimation=f"{args.data_dir}/structure_preparer/estimated_charges.txt",
-                                  data_dir=f"{args.data_dir}/charges_calculator",
-                                  delete_auxiliary_files=args.delete_auxiliary_files)
-    calculator.calculate_charges()
-    calculator.write_charges_to_files()
+    # calculate parcial atomic charges
+    charge_calculator_input = f"{structure_preparer_data_directory}/{structure_preparer_output}"
+    charge_calculator_data_directory = f"{args.data_dir}/charge_calculator"
+    charge_calculator_output = f"{path.basename(args.PDB_file)[:-4]}.cif"
+    charges_estimation = f"{structure_preparer_data_directory}/estimated_charges.txt"
+    charge_calculator = ChargeCalculator(input_mmCIF_file=charge_calculator_input,
+                                         charges_estimation=charges_estimation,
+                                         output_mmCIF_file=charge_calculator_output,
+                                         data_dir=charge_calculator_data_directory,
+                                         delete_auxiliary_files=args.delete_auxiliary_files)
+    charge_calculator.calculate_charges()
+    charge_calculator.write_charges_to_files()
