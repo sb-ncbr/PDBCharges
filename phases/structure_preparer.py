@@ -505,7 +505,7 @@ class StructurePreparer:
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
         print("ok")
-        exit()
+
 
 if __name__ == "__main__":
     args = load_arguments()
