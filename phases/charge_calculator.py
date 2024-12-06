@@ -1,4 +1,3 @@
-import argparse
 from math import dist
 from os import path, system
 
@@ -9,34 +8,12 @@ from rdkit import Chem
 
 
 class AtomSelector(PDB.Select):
+    """
+    Support class for Biopython.
+    After initialization, a set with all full ids of the atoms to be written into the substructure must be stored in self.full_ids.
+    """
     def accept_atom(self, atom):
         return int(atom.full_id in self.full_ids)
-
-
-def load_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_mmCIF_file",
-                        help="mmCIF file with protein structure.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--output_mmCIF_file",
-                        help="mmCIF file to store structure with charges. "
-                             "mmCIF file will be save into directory defined by --data_dir argument.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--data_dir",
-                        help="Directory for saving results.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--charges_estimation",
-                        help="File with estimation of partial atomic charges.",
-                        type=str,
-                        required=False)
-    parser.add_argument("--delete_auxiliary_files",
-                        help="Auxiliary calculation files can be large. With this argument, "
-                             "the auxiliary files will be continuously deleted during the calculation.",
-                        action="store_true")
-    return parser.parse_args()
 
 
 class ChargeCalculator:
@@ -51,6 +28,7 @@ class ChargeCalculator:
     def __init__(self,
                  input_mmCIF_file: str,
                  charges_estimation: str,
+                 logger,
                  output_mmCIF_file: str,
                  data_dir: str,
                  delete_auxiliary_files: bool):
@@ -62,32 +40,24 @@ class ChargeCalculator:
         :param delete_auxiliary_files: auxiliary files created by the calculation taking up a significant amount of space will be deleted
         """
 
-        print("\nCHARGE CALCULATOR")
-        print("Charge calculator initialization... ", end="")
+        self.logger = logger
 
-        if not path.isfile(input_mmCIF_file):
-            exit(f"\nERROR! File {input_mmCIF_file} does not exist!\n")
-        if path.exists(data_dir):
-            exit(f"\nError! Directory with name {data_dir} exists. "
-                 f"Remove existed directory or change --data_dir argument!\n")
-        if charges_estimation and not path.isfile(charges_estimation):
-            exit(f"\nERROR! File {charges_estimation} does not exist!\n")
+        self.logger.print("\nCHARGE CALCULATOR")
+        self.logger.print("Charge calculator initialization... ", end="")
 
         self.output_mmCIF_file = output_mmCIF_file
         self.charges_estimation = charges_estimation
-        self.data_dir = data_dir
         self.delete_auxiliary_files = delete_auxiliary_files
-
+        self.data_dir = data_dir
         system(f"mkdir {self.data_dir}")
         system(f"cp {input_mmCIF_file} {self.data_dir}/{self.output_mmCIF_file}")
-
-        print("ok")
+        self.logger.print("ok")
 
 
     def calculate_charges(self):
 
         # load structure by Biopython
-        print("Loading structure... ", end="")
+        self.logger.print("Loading structure... ", end="")
         structure = PDB.MMCIFParser(QUIET=True).get_structure(structure_id="structure",
                                                               filename=f"{self.data_dir}/{self.output_mmCIF_file}")[0]
         structure_atoms = list(structure.get_atoms())
@@ -95,30 +65,31 @@ class ChargeCalculator:
         io = PDB.PDBIO()
         io.set_structure(structure)
         kdtree = PDB.NeighborSearch(structure_atoms)
-        print("ok")
+        self.logger.print("ok")
 
         # load partial atomic charges estimation
-        print("Loading patial atomic charges estimation... ", end="")
-        if self.charges_estimation:
-            charge_estimations = [float(x) for x in open(self.charges_estimation, "r").read().split()]
-        else:
-            charge_estimations = [0 for _ in range(len(structure_atoms))]
+        self.logger.print("Loading patial atomic charges estimation... ", end="")
+        charge_estimations = [float(x) for x in open(self.charges_estimation, "r").read().split()]
         total_charge = round(sum(charge_estimations))
         # creating charge attributes to make them easy to work with in Biopython library
         for atom, atomic_charge_estimation in zip(structure_atoms, charge_estimations):
             atom.charge_estimation = atomic_charge_estimation
             atom.cm5_charge = None
-        print("ok")
+        self.logger.print("ok")
 
         # calculate the charges for each atom using the cutoff approach.
+        self.logger.print("Calculating of patial atomic charges... ", end="", silence=True)
         for calculated_atom_i, calculated_atom in enumerate(tqdm.tqdm(structure_atoms,
                                                                       desc="Charges calculation",
                                                                       unit="atoms",
                                                                       smoothing=0,
-                                                                      delay=0.5,
-                                                                      mininterval=0.5,
-                                                                      maxinterval=0.5),
+                                                                      delay=0.1,
+                                                                      mininterval=0.4,
+                                                                      maxinterval=0.4),
                                                             start=1):
+
+            if calculated_atom_i > 25:
+                continue
 
             # To speed up the calculation, the charges of the hydrogen and oxygen atoms bound to one atom
             # are calculated together with the nearest other heavy atoms
@@ -282,11 +253,22 @@ class ChargeCalculator:
         cm5_charges_sum = sum([charge for charge in cm5_charges if charge]) # filter None values from failed xtb calculations
         correction = (cm5_charges_sum - total_charge) / len(cm5_charges)
         self.cm5_charges = [round(charge - correction, 5) if charge else None for charge in cm5_charges]
+        for res in structure.get_residues():
+            atoms_without_charge = []
+            for atom in res.get_atoms():
+                if atom.cm5_charge is None:
+                    atoms_without_charge.append(atom)
+            if atoms_without_charge:
+                warning = f"charge calculation failed for atom(s) {' '.join([atom.name for atom in atoms_without_charge])}"
+                self.logger.add_warning(chain=res.get_parent().id,
+                                        resnum=res.id[1],
+                                        resname=res.resname,
+                                        warning=warning)
+        self.logger.print("ok... ", silence=True)
 
-        # todo log residues with some non calculated atoms
 
     def write_charges_to_files(self):
-        print("Writing charges to files... ", end="")
+        self.logger.print("Writing charges to files... ", end="")
         with open(f"{self.data_dir}/charges.txt", "w") as charges_file:
             charges_string = " ".join([str(x) for x in self.cm5_charges])
             charges_file.write(charges_string)
@@ -318,15 +300,4 @@ class ChargeCalculator:
                                   f"{atomId + 1}",
                                   f"{charge}"])
         block.write_file(f"{self.data_dir}/{self.output_mmCIF_file}")
-        print("ok\n")
-
-
-if __name__ == "__main__":
-    args = load_arguments()
-    calculator = ChargeCalculator(input_mmCIF_file=args.input_mmCIF_file,
-                                  charges_estimation=args.charges_estimation,
-                                  output_mmCIF_file=args.output_mmCIF_file,
-                                  data_dir=args.data_dir,
-                                  delete_auxiliary_files=args.delete_auxiliary_files)
-    calculator.calculate_charges()
-    calculator.write_charges_to_files()
+        self.logger.print("ok\n")

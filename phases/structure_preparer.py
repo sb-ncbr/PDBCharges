@@ -1,6 +1,4 @@
-import argparse
 import logging
-import os
 import sys
 from math import dist
 from os import system, path
@@ -20,32 +18,12 @@ from rdkit.Chem import rdFMCS
 
 
 class AtomSelector(biopython_PDB.Select):
+    """
+    Support class for Biopython.
+    After initialization, a set with all full ids of the atoms to be written into the substructure must be stored in self.full_ids.
+    """
     def accept_atom(self, atom):
         return int(atom.full_id in self.full_ids)
-
-def load_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input_PDB_file",
-                        help="PDB file with protein structure which should be prepared.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--output_mmCIF_file",
-                        help="mmCIF file to store prepared structure. "
-                             "mmCIF file will be save into directory defined by --data_dir argument.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--data_dir",
-                        help="Directory for saving results.",
-                        type=str,
-                        required=True)
-    parser.add_argument("--save_charges_estimation",
-                        help="Save estimation of partial atomic charges into txt file.",
-                        action="store_true")
-    parser.add_argument("--delete_auxiliary_files",
-                        help="Auxiliary calculation files can be large. With this argument, "
-                             "the auxiliary files will be continuously deleted during the calculation.",
-                        action="store_true")
-    return parser.parse_args()
 
 
 class StructurePreparer:
@@ -58,36 +36,32 @@ class StructurePreparer:
 
     def __init__(self,
                  input_PDB_file: str,
+                 CCD_file: str,
+                 logger,
                  data_dir: str,
                  output_mmCIF_file: str,
                  delete_auxiliary_files: bool,
                  save_charges_estimation: bool = False):
         """
         :param input_PDB_file: PDB file containing the structure which should be prepared
+        :param CCD_file: SDF file with Chemical Component Dictionary
         :param data_dir: directory where the results will be stored
         :param output_mmCIF_file: mmCIF file in which prepared structure will be stored
         :param delete_auxiliary_files: auxiliary files created during the preraparation will be deleted
         :param save_charges_estimation: save estimation of partial atomic charges from pdb2pqr, Dimorphite-DL and CCD
         """
-
-        print("\nSTRUCTURE PREPARER")
-        print("Structure preparer initialization... ", end="")
-
-        if not path.isfile(input_PDB_file):
-            exit(f"\nERROR! File {input_PDB_file} does not exist!\n")
-        if path.exists(data_dir):
-            exit(f"\nError! Directory with name {data_dir} exists. "
-                 f"Remove existed directory or change --data_dir argument!\n")
-
+        self.logger = logger
+        self.logger.print("\nSTRUCTURE PREPARER")
+        self.logger.print("Structure preparer initialization... ", end="")
         self.input_PDB_file = input_PDB_file
+        self.CCD_file = CCD_file
         self.output_mmCIF_file = output_mmCIF_file
         self.data_dir = data_dir
+        system(f"mkdir {self.data_dir}")
         self.delete_auxiliary_files = delete_auxiliary_files
         self.save_charges_estimation = save_charges_estimation
         self.pH = 7.2
-        system(f"mkdir {self.data_dir}")
-
-        print("ok")
+        self.logger.print("ok")
 
 
     def _get_molecules_from_CCD(self,
@@ -103,7 +77,7 @@ class StructurePreparer:
                                   label_states=False,
                                   pka_precision=0.001)
         molecules = {}
-        for CCD_mol_sdf in open("CCD/Components-pub.sdf", "r").read().split("$$$$\n"):
+        for CCD_mol_sdf in open(self.CCD_file, "r").read().split("$$$$\n"):
             mol_name = CCD_mol_sdf.partition("\n")[0]
             if mol_name in molecule_names: # we process only molecules defined in molecule names
                 supplier = Chem.SDMolSupplier()
@@ -165,7 +139,7 @@ class StructurePreparer:
         It selects the first model, alternative locations, fills in missing heavy atoms, etc.
         """
 
-        print("Fixing structure... ", end="")
+        self.logger.print("Fixing structure... ", end="")
         fixer = PDBFixer(filename=self.input_PDB_file)
 
         # download templates for heteroresidues
@@ -181,25 +155,25 @@ class StructurePreparer:
         # add heavy atoms
         fixer.missingResidues = {}
         fixer.findMissingAtoms()
-        # with open(f"{self.data_dir}/logs/added_heavy_atoms.txt", "w") as added_heavy_atoms_file: # log it TODO
-        #     for residue, residue_list in fixer.missingAtoms.items():
-        #         for atom in residue_list:
-        #             added_heavy_atoms_file.write(f"{residue} {atom}\n")
+        for residue, missing_atoms in fixer.missingAtoms.items():
+            warning = f"atom(s) {' '.join(atom.name for atom in missing_atoms)} added by pdbfixer"
+            self.logger.add_warning(chain=residue.chain.id,
+                                    resnum=residue.id,
+                                    resname=residue.name,
+                                    warning=warning)
         fixer.addMissingAtoms()
-
-        # write fixed structure to file
         openmm_PDB.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/pdbfixer.pdb", 'w'), keepIds=True)
-        print("ok")
+        self.logger.print("ok")
 
     def remove_hydrogens(self):
-        print("Removing hydrogens ... ", end="")
+        self.logger.print("Removing hydrogens ... ", end="")
         protein = biotite.load_structure(file_path=f"{self.data_dir}/pdbfixer.pdb",
                                          model=1,
                                          include_bonds=True)
         protein_without_hydrogens = protein[protein.element != "H"]
         biotite.save_structure(file_path=f"{self.data_dir}/without_hydrogens.pdb",
                                array=protein_without_hydrogens)
-        print("ok")
+        self.logger.print("ok")
 
     def add_hydrogens_by_hydride(self):
         """
@@ -220,7 +194,7 @@ class StructurePreparer:
         The RDKit library is also used to search for bonds between hetero-residues and standard residues.
         """
 
-        print("Adding hydrogens by hydride... ", end="")
+        self.logger.print("Adding hydrogens by hydride... ", end="")
         # pdb2pqr is part of moleculekit
         residues_processed_by_pdb2pqr = set(
             ['004', '03Y', '0A1', '0AF', '0BN', '1MH', '2AS', '2GX', '2ML', '2MR', '4IN', '4PH', '4PQ', '5JP', 'AA4',
@@ -356,12 +330,39 @@ class StructurePreparer:
                 atom_indices_map = {x[0]: x[1] for x in
                                     sorted(zip(rdkit_mol.GetSubstructMatch(MCS_results.queryMol),
                                                CCD_mol.GetSubstructMatch(MCS_results.queryMol)))}
-                # if len(map) != len(res): log it!, continue
+                if len(atom_indices_map) <= len(res) - 1:
+                    print(f"Warning! {res}")
                 # může se lišit o jeden kyslík, pak pravděpodobně v peptidové vazbě -> list?
                 # pokud se liší o více, tak warning, něco je špatně!
+                CCD_mol_atoms = CCD_mol.GetAtoms()
                 for atom_i, atom in enumerate(res.get_atoms()):
-                    atom.charge_estimation = CCD_mol.GetAtoms()[atom_indices_map[atom_i]].GetFormalCharge()
-                    atom.charged_by_dimorphite = bool(int(CCD_mol.GetAtoms()[atom_indices_map[atom_i]].GetProp("ChargedByDimorphite")))
+                    try:
+                        CCD_atom = CCD_mol_atoms[atom_indices_map[atom_i]]
+                        atom.charge_estimation = CCD_atom.GetFormalCharge()
+                        atom.charged_by_dimorphite = bool(int(CCD_atom.GetProp("ChargedByDimorphite")))
+                    except KeyError: # Mapping for atom failed. It is already logged by previous "if len(atom_indices_map) <= len(res) - 1 statement"
+                        continue
+
+                # because of mapping without bond orders there can be negative charge at double-bond oxygen
+                for atom in res.get_atoms():
+                    if atom.charge_estimation == -1 and atom.element == "O":
+                        bonded_atom_indices, bond_types = protein.bonds.get_bonds(atom.serial_number - 1)
+                        if 2 in bond_types: # oxygen is bonded by double bond
+                            if len(bonded_atom_indices) > 1:
+                                # log
+                                continue
+                            bonded_atom_2_indices, bond_2_types = protein.bonds.get_bonds(bonded_atom_indices[0]) # bonded atoms over two bonds
+                            for bonded_atom_2_index, bond_type in zip(bonded_atom_2_indices, bond_2_types):
+                                if bonded_atom_2_index == atom.serial_number - 1:
+                                    continue
+                                elif protein.element[bonded_atom_2_index] == "O" and bond_type == 1:
+                                    right_oxygen = structure_atoms[bonded_atom_2_index]
+                                    atom.charge_estimation, right_oxygen.charge_estimation = right_oxygen.charge_estimation, atom.charge_estimation
+                                    atom.charged_by_dimorphite, right_oxygen.charged_by_dimorphite = right_oxygen.charged_by_dimorphite, atom.charged_by_dimorphite
+                                    break
+                            else:
+                                # log
+                                pass
 
                 # find interrezidual covalent bonds and modify charge estimation for specific cases
                 res_center = res.center_of_mass(geometric=True)
@@ -438,7 +439,7 @@ class StructurePreparer:
         self.hydride_mask = protein_with_hydrogens.hydride_mask
         biotite.save_structure(file_path=f"{self.data_dir}/hydride.pdb",
                                array=protein_with_hydrogens)
-        print("ok")
+        self.logger.print("ok")
 
     def add_hydrogens_by_moleculekit(self):
         """
@@ -447,7 +448,7 @@ class StructurePreparer:
         However, the Moleculekit is not universal and is only able to work with a limited set of residues.
         """
 
-        print("Adding hydrogens by moleculekit... ", end="")
+        self.logger.print("Adding hydrogens by moleculekit... ", end="")
         molecule = moleculekit_PDB.Molecule(f"{self.data_dir}/hydride.pdb")
         original_stdout = sys.stdout # redirect moleculekit output to files
         sys.stdout = open(f"{self.data_dir}/moleculekit_chains_report.txt", 'w')
@@ -504,17 +505,4 @@ class StructurePreparer:
 
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
-        print("ok")
-
-
-if __name__ == "__main__":
-    args = load_arguments()
-    structure_preparer = StructurePreparer(input_PDB_file=args.input_PDB_file,
-                                           output_mmCIF_file=args.output_mmCIF_file,
-                                           save_charges_estimation=args.save_charges_estimation,
-                                           data_dir=args.data_dir,
-                                           delete_auxiliary_files=args.delete_auxiliary_files)
-    structure_preparer.fix_structure()
-    structure_preparer.remove_hydrogens()
-    structure_preparer.add_hydrogens_by_hydride()  # add hydrogens to the residues that the moleculekit can't process
-    structure_preparer.add_hydrogens_by_moleculekit()  # add hydrogens to rest of structure
+        self.logger.print("ok")
