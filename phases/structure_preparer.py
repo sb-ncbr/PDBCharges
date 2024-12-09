@@ -457,25 +457,15 @@ class StructurePreparer:
 
         # adding of hydrogens
         protein.charge = [atom.charge_estimation for atom in structure_atoms]
-        # protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure_atoms])
-        protein.set_annotation("hydride_mask", [True for atom in structure_atoms])
-        # original_stderr = sys.stderr # redirect hydride output to file
-        # sys.stderr = open(f"{self.data_dir}/hydride.txt", 'w')
-        print(protein)
-        print(protein[0])
-        print(protein[39])
-        exit()
-        print(protein.hydride_mask)
-
+        protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure_atoms])
+        original_stderr = sys.stderr # redirect hydride output to file
+        sys.stderr = open(f"{self.data_dir}/hydride.txt", 'w')
         protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=protein.hydride_mask)
-        exit()
-
         sys.stderr = original_stderr
         self.hydride_charges = protein_with_hydrogens.charge
         self.hydride_mask = protein_with_hydrogens.hydride_mask
         biotite.save_structure(file_path=f"{self.data_dir}/hydride.pdb",
                                array=protein_with_hydrogens)
-        exit()
         self.logger.print("ok")
 
     def add_hydrogens_by_moleculekit(self):
@@ -543,4 +533,3 @@ class StructurePreparer:
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
         self.logger.print("ok")
-        exit()
