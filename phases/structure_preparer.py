@@ -1,7 +1,7 @@
 import logging
 import sys
 from math import dist
-from os import system, path
+from os import system
 
 import hydride
 import numpy as np
@@ -85,7 +85,7 @@ class StructurePreparer:
                 CCD_mol = next(supplier)
                 if CCD_mol is None:
                     molecules[mol_name] = (None,
-                                           "The molecule cannot be loaded by RDKit.")
+                                           "The molecule cannot be loaded by RDKit and therefore the residue is left neutral.")
                 else:
                     CCD_mol = Chem.RemoveAllHs(CCD_mol)
                     CCD_mol_smiles = Chem.MolToSmiles(CCD_mol)
@@ -109,7 +109,7 @@ class StructurePreparer:
 
                     if len(dimorphite_mol.GetAtoms()) != len(atom_indices_map):
                         molecules[mol_name] = (CCD_mol,
-                                               "Atom mapping of structures from CCD and Dimorphite-DL failed. The formal charges are taken from the CCD.")
+                                               "Mapping of formal charges from Dimorphite-DL to CCD failed and therefore formal charges are taken from CCD only.")
                     else:
                         dimorphite_formal_charges = [atom.GetFormalCharge() for _, atom in sorted(zip(atom_indices_map,
                                                                                                       dimorphite_mol.GetAtoms()))]
@@ -127,7 +127,7 @@ class StructurePreparer:
                                     CCD_atom.SetProp("ChargedByDimorphite", "1")
                                     CCD_atom.SetFormalCharge(dimorphite_formal_charge)
                         molecules[mol_name] = (CCD_mol,
-                                               "The formal charges are taken from CCD and Dimorphite-DL.")
+                                               None)
         return molecules
 
     def fix_structure(self):
@@ -143,20 +143,22 @@ class StructurePreparer:
         fixer = PDBFixer(filename=self.input_PDB_file)
 
         # download templates for heteroresidues
-        set_of_resnames = set([x.name for x in fixer.topology.residues()])
-        for resname in set_of_resnames:
-            if resname not in fixer.templates.keys():
+        for residue in fixer.topology.residues():
+            if residue.name not in fixer.templates.keys():
                 try:
-                    fixer.downloadTemplate(resname)
+                    fixer.downloadTemplate(residue.name)
                 except:
-                    pass
-                    # log heteroresiduum {resname} does not exist or cannot be downloaded! todo
+                    warning = f"PDBFixer could not download the template for this residue."
+                    self.logger.add_warning(chain=residue.chain.id,
+                                            resnum=residue.id,
+                                            resname=residue.name,
+                                            warning=warning)
 
         # add heavy atoms
         fixer.missingResidues = {}
         fixer.findMissingAtoms()
         for residue, missing_atoms in fixer.missingAtoms.items():
-            warning = f"atom(s) {' '.join(atom.name for atom in missing_atoms)} added by pdbfixer"
+            warning = f"Atom(s) {' '.join(atom.name for atom in missing_atoms)} were added by PDBFixer."
             self.logger.add_warning(chain=residue.chain.id,
                                     resnum=residue.id,
                                     resname=residue.name,
@@ -274,6 +276,9 @@ class StructurePreparer:
         # for example, a structure with PDB code 107d and its serial numbers 218 and 445
         structure = biopython_PDB.PDBParser(QUIET=True).get_structure(id="structure",
                                                                       file=f"{self.data_dir}/without_hydrogens.pdb")[0]
+        # Biopython works with atoms hierarchically through chain, residue, atom
+        # however, the order of atoms in the file may be different
+        # we create a list that is sorted by serial_number and work with it
         structure_atoms = list(structure.get_atoms())
         structure_atoms.sort(key=lambda x: x.serial_number)
         selector = AtomSelector()
@@ -302,77 +307,96 @@ class StructurePreparer:
             # load formal charges for ligand from CCD. Add other formal charges by Dimorphite-DL
             residues_processed_by_hydride_formal_charges = self._get_molecules_from_CCD(set(res.resname for res in residues_processed_by_hydride))
 
-            for res in residues_processed_by_hydride:
-                res.hydride_mask = True
+            for residue in residues_processed_by_hydride:
+                residue.hydride_mask = True
                 try:
-                    CCD_mol, log = residues_processed_by_hydride_formal_charges[res.resname]
-                    # logovat podle logu! 1) je v ccd, ale není načetnutelný 2) nešlo dimorphite
+                    CCD_mol, warning = residues_processed_by_hydride_formal_charges[residue.resname]
+                    if warning:
+                        self.logger.add_warning(chain=residue.get_parent().id,
+                                                resnum=residue.id[1],
+                                                resname=residue.resname,
+                                                warning=warning)
                 except KeyError:
-                    # zalogovat, že reziduum není v CCD, necháváme neutrální
-                    continue
+                    warning = f"Name {residue.resname} was not found in the CCD and therefore the residue is left neutral."
+                    self.logger.add_warning(chain=residue.get_parent().id,
+                                            resnum=residue.id[1],
+                                            resname=residue.resname,
+                                            warning=warning)
 
-                # map charges from CCD and Dimorphite-DL to residuum from structure
-                res_atoms = [atom for atom in res.get_atoms()]
-                res_atoms.sort(key=lambda x: x.serial_number)
-                selector.full_ids = set([atom.full_id for atom in res_atoms])
-                io.save(file=f"{self.data_dir}/{res.resname}_{res.id[1]}.pdb",
-                        select=selector)
-                rdkit_mol = Chem.MolFromPDBFile(molFileName=f"{self.data_dir}/{res.resname}_{res.id[1]}.pdb",
-                                                removeHs=False,
-                                                sanitize=False)
-                rdkit_mol = Chem.RemoveAllHs(rdkit_mol)
-                params = rdFMCS.MCSParameters()
-                params.AtomTyper = rdFMCS.AtomCompare.CompareElements
-                params.BondTyper = rdFMCS.BondCompare.CompareAny
-                params.AtomCompareParameters.MatchFormalCharge = False
-                params.Timeout = 60
-                MCS_results = rdFMCS.FindMCS([rdkit_mol, CCD_mol], params)
-                atom_indices_map = {x[0]: x[1] for x in
-                                    sorted(zip(rdkit_mol.GetSubstructMatch(MCS_results.queryMol),
-                                               CCD_mol.GetSubstructMatch(MCS_results.queryMol)))}
-                if len(atom_indices_map) <= len(res) - 1:
-                    print(f"Warning! {res}")
-                # může se lišit o jeden kyslík, pak pravděpodobně v peptidové vazbě -> list?
-                # pokud se liší o více, tak warning, něco je špatně!
-                CCD_mol_atoms = CCD_mol.GetAtoms()
-                for atom_i, atom in enumerate(res.get_atoms()):
-                    try:
-                        CCD_atom = CCD_mol_atoms[atom_indices_map[atom_i]]
-                        atom.charge_estimation = CCD_atom.GetFormalCharge()
-                        atom.charged_by_dimorphite = bool(int(CCD_atom.GetProp("ChargedByDimorphite")))
-                    except KeyError: # Mapping for atom failed. It is already logged by previous "if len(atom_indices_map) <= len(res) - 1 statement"
-                        continue
+                if CCD_mol:
+                    # map charges from CCD and Dimorphite-DL to residuum from structure
+                    res_atoms = [atom for atom in residue.get_atoms()]
+                    res_atoms.sort(key=lambda x: x.serial_number)
+                    selector.full_ids = set([atom.full_id for atom in res_atoms])
+                    io.save(file=f"{self.data_dir}/{residue.resname}_{residue.id[1]}.pdb",
+                            select=selector)
+                    rdkit_mol = Chem.MolFromPDBFile(molFileName=f"{self.data_dir}/{residue.resname}_{residue.id[1]}.pdb",
+                                                    removeHs=False,
+                                                    sanitize=False)
+                    rdkit_mol = Chem.RemoveAllHs(rdkit_mol)
+                    params = rdFMCS.MCSParameters()
+                    params.AtomTyper = rdFMCS.AtomCompare.CompareElements
+                    params.BondTyper = rdFMCS.BondCompare.CompareAny
+                    params.AtomCompareParameters.MatchFormalCharge = False
+                    params.Timeout = 60
+                    MCS_results = rdFMCS.FindMCS([rdkit_mol, CCD_mol], params)
+                    atom_indices_map = {x[0]: x[1] for x in
+                                        sorted(zip(rdkit_mol.GetSubstructMatch(MCS_results.queryMol),
+                                                   CCD_mol.GetSubstructMatch(MCS_results.queryMol)))}
 
-                # because of mapping without bond orders there can be negative charge at double-bond oxygen
-                for atom in res.get_atoms():
-                    if atom.charge_estimation == -1 and atom.element == "O":
-                        bonded_atom_indices, bond_types = protein.bonds.get_bonds(atom.serial_number - 1)
-                        if 2 in bond_types: # oxygen is bonded by double bond
-                            if len(bonded_atom_indices) > 1:
-                                # log
+                    if len(atom_indices_map) <= len(residue) - 1: # one oxygen can miss because of peptide bond
+                        warning = "Mapping of formal charges from Dimorphite-DL and CCD to residue failed and therefore the residue is left neutral."
+                        self.logger.add_warning(chain=residue.get_parent().id,
+                                                resnum=residue.id[1],
+                                                resname=residue.resname,
+                                                warning=warning)
+                    else:
+                        CCD_mol_atoms = CCD_mol.GetAtoms()
+                        for atom_i, atom in enumerate(residue.get_atoms()):
+                            try:
+                                CCD_atom = CCD_mol_atoms[atom_indices_map[atom_i]]
+                                atom.charge_estimation = CCD_atom.GetFormalCharge()
+                                atom.charged_by_dimorphite = bool(int(CCD_atom.GetProp("ChargedByDimorphite")))
+                            except KeyError: # Mapping for atom failed. It is already logged by previous "if len(atom_indices_map) <= len(res) - 1 statement"
                                 continue
-                            bonded_atom_2_indices, bond_2_types = protein.bonds.get_bonds(bonded_atom_indices[0]) # bonded atoms over two bonds
-                            for bonded_atom_2_index, bond_type in zip(bonded_atom_2_indices, bond_2_types):
-                                if bonded_atom_2_index == atom.serial_number - 1:
-                                    continue
-                                elif protein.element[bonded_atom_2_index] == "O" and bond_type == 1:
-                                    right_oxygen = structure_atoms[bonded_atom_2_index]
-                                    atom.charge_estimation, right_oxygen.charge_estimation = right_oxygen.charge_estimation, atom.charge_estimation
-                                    atom.charged_by_dimorphite, right_oxygen.charged_by_dimorphite = right_oxygen.charged_by_dimorphite, atom.charged_by_dimorphite
-                                    break
-                            else:
-                                # log
-                                pass
+
+                        # because of mapping without bond orders there can be negative charge at double-bond oxygen
+                        for atom in residue.get_atoms():
+                            if atom.charge_estimation == -1 and atom.element == "O":
+                                bonded_atom_indices, bond_types = protein.bonds.get_bonds(atom.serial_number - 1)
+                                if 2 in bond_types: # oxygen is bonded by double bond
+                                    if len(bonded_atom_indices) > 1:
+                                        warning = f"Oxygen {atom.name} with double bond has more neighbors than one."
+                                        self.logger.add_warning(chain=residue.get_parent().id,
+                                                                resnum=residue.id[1],
+                                                                resname=residue.resname,
+                                                                warning=warning)
+                                        continue
+                                    bonded_atom_2_indices, bond_2_types = protein.bonds.get_bonds(bonded_atom_indices[0]) # bonded atoms over two bonds
+                                    for bonded_atom_2_index, bond_type in zip(bonded_atom_2_indices, bond_2_types):
+                                        if bonded_atom_2_index == atom.serial_number - 1:
+                                            continue
+                                        elif protein.element[bonded_atom_2_index] == "O" and bond_type == 1:
+                                            right_oxygen = structure_atoms[bonded_atom_2_index]
+                                            atom.charge_estimation, right_oxygen.charge_estimation = right_oxygen.charge_estimation, atom.charge_estimation
+                                            atom.charged_by_dimorphite, right_oxygen.charged_by_dimorphite = right_oxygen.charged_by_dimorphite, atom.charged_by_dimorphite
+                                            break
+                                    else:
+                                        warning = f"Oxygen {atom.name} has probably wrong formal charge."
+                                        self.logger.add_warning(chain=residue.get_parent().id,
+                                                                resnum=residue.id[1],
+                                                                resname=residue.resname,
+                                                                warning=warning)
 
                 # find interrezidual covalent bonds and modify charge estimation for specific cases
-                res_center = res.center_of_mass(geometric=True)
-                res_radius = max([dist(res_center, atom.coord) for atom in res.get_atoms()])
+                res_center = residue.center_of_mass(geometric=True)
+                res_radius = max([dist(res_center, atom.coord) for atom in residue.get_atoms()])
                 substructure_atoms = kdtree.search(center=res_center,
                                                    radius=res_radius + 5,
                                                    level="A")
                 substructure_atoms.sort(key=lambda x: x.serial_number)
                 selector.full_ids = set([atom.full_id for atom in substructure_atoms])
-                residuum_file = f"{self.data_dir}/{res.get_parent().id}_{'_'.join([str(id_part) for id_part in res.id if id_part != ' '])}_substructure.pdb"
+                residuum_file = f"{self.data_dir}/{residue.get_parent().id}_{'_'.join([str(id_part) for id_part in residue.id if id_part != ' '])}_substructure.pdb"
                 io.save(file=residuum_file,
                         select=selector,
                         preserve_atom_numbering=True)
@@ -388,7 +412,7 @@ class StructurePreparer:
                     ba2 = structure_atoms[ba2_index]
                     ba1_res = ba1.get_parent()
                     ba2_res = ba2.get_parent()
-                    if ba1_res != ba2_res and res in (ba1_res, ba2_res):  # inter-residual bond
+                    if ba1_res != ba2_res and residue in (ba1_res, ba2_res):  # inter-residual bond
                         # set zero charge for interresidual peptide bonds
                         # this is true for both CCD and Dimorphite-DL formal charges
                         if set([ba1.element, ba2.element]) == {"N", "C"}:
@@ -413,9 +437,9 @@ class StructurePreparer:
                         ba2_res.hydride_mask = True
 
         # final definition which atoms should be processed by hydride
-        for res in structure.get_residues():
-            if hasattr(res, "hydride_mask"):
-                for atom in res.get_atoms():
+        for residue in structure.get_residues():
+            if hasattr(residue, "hydride_mask"):
+                for atom in residue.get_atoms():
                     atom.hydride_mask = True
 
         # set bonds with unknown order as single
@@ -434,7 +458,10 @@ class StructurePreparer:
         # adding of hydrogens
         protein.charge = [atom.charge_estimation for atom in structure_atoms]
         protein.set_annotation("hydride_mask", [atom.hydride_mask for atom in structure_atoms])
+        original_stderr = sys.stderr # redirect hydride output to file
+        sys.stderr = open(f"{self.data_dir}/hydride.txt", 'w')
         protein_with_hydrogens, _ = hydride.add_hydrogen(protein, mask=protein.hydride_mask)
+        sys.stderr = original_stderr
         self.hydride_charges = protein_with_hydrogens.charge
         self.hydride_mask = protein_with_hydrogens.hydride_mask
         biotite.save_structure(file_path=f"{self.data_dir}/hydride.pdb",

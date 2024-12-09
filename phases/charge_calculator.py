@@ -1,5 +1,5 @@
 from math import dist
-from os import path, system
+from os import system
 
 import gemmi
 import tqdm
@@ -87,9 +87,6 @@ class ChargeCalculator:
                                                                       mininterval=0.4,
                                                                       maxinterval=0.4),
                                                             start=1):
-
-            if calculated_atom_i > 25:
-                continue
 
             # To speed up the calculation, the charges of the hydrogen and oxygen atoms bound to one atom
             # are calculated together with the nearest other heavy atoms
@@ -253,16 +250,16 @@ class ChargeCalculator:
         cm5_charges_sum = sum([charge for charge in cm5_charges if charge]) # filter None values from failed xtb calculations
         correction = (cm5_charges_sum - total_charge) / len(cm5_charges)
         self.cm5_charges = [round(charge - correction, 5) if charge else None for charge in cm5_charges]
-        for res in structure.get_residues():
+        for residue in structure.get_residues():
             atoms_without_charge = []
-            for atom in res.get_atoms():
+            for atom in residue.get_atoms():
                 if atom.cm5_charge is None:
                     atoms_without_charge.append(atom)
             if atoms_without_charge:
-                warning = f"charge calculation failed for atom(s) {' '.join([atom.name for atom in atoms_without_charge])}"
-                self.logger.add_warning(chain=res.get_parent().id,
-                                        resnum=res.id[1],
-                                        resname=res.resname,
+                warning = f"Charge calculation failed for atom(s) {' '.join([atom.name for atom in atoms_without_charge])}."
+                self.logger.add_warning(chain=residue.get_parent().id,
+                                        resnum=residue.id[1],
+                                        resname=residue.resname,
                                         warning=warning)
         self.logger.print("ok... ", silence=True)
 

@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
-
 import argparse
 import csv
 from collections import defaultdict
-from os import path, system
+from os import path, system, listdir
 
 from phases.charge_calculator import ChargeCalculator
 from phases.structure_preparer import StructurePreparer
@@ -33,8 +31,8 @@ def load_arguments():
     args = parser.parse_args()
     if not path.isfile(args.PDB_file):
         exit(f"\nERROR! File {args.PDB_file} does not exist!\n")
-    if path.exists(args.data_dir):
-        exit(f"\nError! Directory with name {args.data_dir} exists. "
+    if path.exists(args.data_dir) and listdir(args.data_dir):
+        exit(f"\nError! Directory with name {args.data_dir} exists and is not empty. "
              f"Remove existed directory or change --data_dir argument!\n")
     print("ok")
     return args
@@ -69,8 +67,9 @@ if __name__ == "__main__":
 
     # prepare directories to store data
     results_directory = f"{args.data_dir}/results_{path.basename(args.PDB_file)[:-4].lower()}"
-    system(f"mkdir {args.data_dir}; "
-           f"mkdir {args.data_dir}/input_PDB; "
+    if not path.exists(args.data_dir):
+        system(f"mkdir {args.data_dir}")
+    system(f"mkdir {args.data_dir}/input_PDB; "
            f"mkdir {results_directory}; "
            f"cp {args.PDB_file} {args.data_dir}/input_PDB")
 
@@ -116,7 +115,7 @@ if __name__ == "__main__":
         with open(residual_warnings_file, "r") as f:
             for chain, res_num, res_name, warning in list(csv.reader(f, delimiter=";")):
                 residual_warnings[(chain, int(res_num), res_name)].append(warning)
-        warnings = sorted([(chain, res_num, res_name, ", ".join(warning)) for (chain, res_num, res_name), warning in residual_warnings.items()])
+        warnings = sorted([(chain, res_num, res_name, " ".join(warning)) for (chain, res_num, res_name), warning in residual_warnings.items()])
         with open(residual_warnings_file, 'w') as f:
             csv_writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_NONNUMERIC)
             for line in warnings:
