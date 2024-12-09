@@ -52,8 +52,7 @@ RUN pip install --no-cache-dir \
     rdkit==2023.09.6 \
     moleculekit==1.9.15 \
     pdb2pqr==3.6.1 \
-    openmm==8.2.0 \
-    && python3 
+    openmm==8.2.0
 
 # Install pdbfixer
 RUN git clone https://github.com/openmm/pdbfixer.git /opt/pdbfixer \
@@ -66,11 +65,12 @@ RUN git clone https://github.com/openmm/pdbfixer.git /opt/pdbfixer \
 COPY calculate_charges_workflow.py .
 COPY phases phases
 COPY docker docker
-# Copy the custom preparation.py script from moleculekit lib
+
+# Edit preparation.py file from moleculekit lib
 RUN python3 docker/edit_moleculekit.py /opt/venv/lib/python3.11/site-packages/moleculekit/tools/preparation.py
 
 ### Stage 2: Runtime stage
-FROM python:3.11-slim
+FROM python:3.11-slim AS runtime
 
 ## Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
@@ -80,14 +80,22 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopenblas-dev \
+    gfortran \
     nano \
     wget \
     openbabel=3.1.1+dfsg-9+b3 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Get prepared python environment and other artefacts from build
+## Copy artefacts from build container
+# Python libs
 COPY --from=build /opt/venv /opt/venv
+# xtb
+COPY --from=build /usr/local/bin/xtb /usr/local/bin/
+COPY --from=build /usr/local/lib/libxtb.so* /usr/local/lib/
+COPY --from=build /usr/local/share/xtb /usr/local/share/xtb
+# PDBCharges
 COPY --from=build /opt/PDBCharges /opt/PDBCharges
 
 # Set working directory
