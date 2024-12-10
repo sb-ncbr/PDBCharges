@@ -60,7 +60,7 @@ class ChargeCalculator:
         self.logger.print("Loading structure... ", end="")
         structure = PDB.MMCIFParser(QUIET=True).get_structure(structure_id="structure",
                                                               filename=f"{self.data_dir}/{self.output_mmCIF_file}")[0]
-        structure_atoms = list(structure.get_atoms())
+        structure_atoms = sorted(structure.get_atoms(), key=lambda x: x.serial_number)
         selector = AtomSelector()
         io = PDB.PDBIO()
         io.set_structure(structure)

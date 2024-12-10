@@ -279,8 +279,7 @@ class StructurePreparer:
         # Biopython works with atoms hierarchically through chain, residue, atom
         # however, the order of atoms in the file may be different
         # we create a list that is sorted by serial_number and work with it
-        structure_atoms = list(structure.get_atoms())
-        structure_atoms.sort(key=lambda x: x.serial_number)
+        structure_atoms = sorted(structure.get_atoms(), key=lambda x: x.serial_number)
         selector = AtomSelector()
         io = biopython_PDB.PDBIO()
         io.set_structure(structure)
@@ -325,8 +324,7 @@ class StructurePreparer:
 
                 if CCD_mol:
                     # map charges from CCD and Dimorphite-DL to residuum from structure
-                    res_atoms = [atom for atom in residue.get_atoms()]
-                    res_atoms.sort(key=lambda x: x.serial_number)
+                    res_atoms = sorted(residue.get_atoms(), key=lambda x: x.serial_number)
                     selector.full_ids = set([atom.full_id for atom in res_atoms])
                     io.save(file=f"{self.data_dir}/{residue.resname}_{residue.id[1]}.pdb",
                             select=selector)
@@ -517,7 +515,7 @@ class StructurePreparer:
         for atom, moleculekit_charge in zip(combined_structure.get_atoms(), pdb2pqr_charges):
             atom.charge_estimation = moleculekit_charge
         for h_chain, c_chain in zip(sorted(hydride_structure), sorted(combined_structure)):
-            for res_i, (h_res, c_res) in enumerate(zip(h_chain, c_chain)):
+            for res_i, (h_res, c_res) in enumerate(zip(sorted(h_chain), sorted(c_chain))):
                 c_res.resname = h_res.resname # rename amber residue names from moleculekit back
                 if any([atom.hydride_mask for atom in h_res]):
                     combined_structure[c_chain.id].detach_child(c_res.id)
@@ -539,9 +537,10 @@ class StructurePreparer:
 
         if self.save_charges_estimation:
             with open(f"{self.data_dir}/estimated_charges.txt", "w") as charges_file:
-                charges_string = " ".join([str(round(charge, 4)) for charge in pdb2pqr_charges + prepared_molecule.formalcharge])
+                charges_string = " ".join([str(round(atom.charge_estimation, 4)) for atom in combined_structure.get_atoms()])
                 charges_file.write(charges_string)
 
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
         self.logger.print("ok")
+        exit()
