@@ -450,9 +450,21 @@ class StructurePreparer:
         protein.bonds = BondList(protein.bonds.get_atom_count(), bond_array)
 
         # estimation of charges for standard aminoacids processed by hydride
+        # the function hydride.estimate_amino_acid_charges has errors, and therefore
+        # we cotroll to avoid assigning charges to atoms involved in an interresidual bond
+        interresidual_bonds_atom_indices = set()
+        bonds = protein.bonds.as_array()
+        for a1, ch1, r1, a2, ch2, r2 in zip(bonds[:, 0],
+                                            protein.chain_id[bonds[:, 0]],
+                                            protein.res_id[bonds[:, 0]],
+                                            bonds[:, 1],
+                                            protein.chain_id[bonds[:, 1]],
+                                            protein.res_id[bonds[:,1]]):
+            if (ch1, r1) != (ch2, r2):
+                interresidual_bonds_atom_indices.update((a1, a2))
         hydride_estimated_charges = hydride.estimate_amino_acid_charges(protein, ph=self.pH)
-        for atom, hydride_estimated_charge in zip(structure_atoms, hydride_estimated_charges):
-            if atom.hydride_mask and atom.charge_estimation == 0:
+        for i, (atom, hydride_estimated_charge) in enumerate(zip(structure_atoms, hydride_estimated_charges)):
+            if atom.hydride_mask and atom.charge_estimation == 0 and i not in interresidual_bonds_atom_indices:
                 atom.charge_estimation = hydride_estimated_charge
 
         # adding of hydrogens
