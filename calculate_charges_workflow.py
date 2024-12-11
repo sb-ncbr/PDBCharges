@@ -123,14 +123,5 @@ if __name__ == "__main__":
             for line in warnings:
                 csv_writer.writerow(line)
 
-
-
-    # todo dodělat logy
-
-
-
-    # todo server error pro download
-    # todo 4aoc se na webu chová divně
-    # todo kontrola na clashe
-    # todo pdb2pqr jaké parametry? co titruje, čemu přidává náboje? DNA a RNA, zkontrolovat zda jsou reziduální náboje stejné!
+# todo openmm náboje
     # todo optimalizace vodíků
