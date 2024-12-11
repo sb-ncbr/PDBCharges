@@ -123,5 +123,5 @@ if __name__ == "__main__":
             for line in warnings:
                 csv_writer.writerow(line)
 
-# todo openmm náboje
-    # todo optimalizace vodíků
+
+# todo optimalizace vodíků

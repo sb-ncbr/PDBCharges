@@ -203,9 +203,7 @@ class StructurePreparer:
                                          'GLU', 'GLY', 'HID', 'HIE', 'HIP', 'HIS', 'HOH', 'HSD', 'HSE', 'HSP', 'ILE',
                                          'LEU', 'LYN', 'LYS', 'MET', 'PHE', 'PRO', 'RA', 'RA3', 'RA5', 'RC', 'RC3',
                                          'RC5', 'RG', 'RG3', 'RG5', 'RU', 'RU3', 'RU5', 'SER', 'THR', 'TRP', 'TYM',
-                                         'TYR', 'VAL', 'WAT'}
-        # shortcuts for RNA, also processed by pdb2pqr, defined in RNA_MAPPING
-        residues_processed_by_pdb2pqr.update(["A", "C", "G", "U"])
+                                         'TYR', 'VAL', 'WAT', "A", "C", "G", "U"}
 
         # load structure by Biopython
         # we can use serial numbers because biotite removes any inconsistencies during hydrogen removing
@@ -371,8 +369,19 @@ class StructurePreparer:
                         ba2_res.hydride_mask = True
 
         # final definition which atoms should be processed by hydride
+        # hydrogens should by added to DNA and RNA by moleculekit because of charge consistency
+        # (Dimorphite-DL charges nucleic acids differently then moleculekit)
+        nucleic_acids = {'DA', 'DA3', 'DA5',
+                        'DC', 'DC3', 'DC5',
+                        'DG', 'DG3', 'DG5',
+                        'DT', 'DT3', 'GLH',
+                        'RA', 'RA3', 'RA5',
+                        'RC', 'RC3', 'RC5',
+                        'RG', 'RG3', 'RG5',
+                        'RU', 'RU3', 'RU5'
+                        "A", "C", "G", "U"}
         for residue in structure.get_residues():
-            if hasattr(residue, "hydride_mask"):
+            if hasattr(residue, "hydride_mask") and residue.resname not in nucleic_acids:
                 for atom in residue.get_atoms():
                     atom.hydride_mask = True
 
@@ -493,3 +502,4 @@ class StructurePreparer:
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
         self.logger.print("ok")
+        
