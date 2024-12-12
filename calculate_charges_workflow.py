@@ -123,5 +123,5 @@ if __name__ == "__main__":
             for line in warnings:
                 csv_writer.writerow(line)
 
-
+# zkusit jak moc se zmněí náboje s a bez amberu
 # todo optimalizace vodíků

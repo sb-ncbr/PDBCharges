@@ -241,6 +241,12 @@ class StructurePreparer:
             residues_processed_by_hydride_formal_charges = self._get_molecules_from_CCD(set(res.resname for res in residues_processed_by_hydride))
 
             for residue in residues_processed_by_hydride:
+
+                # skip unknown residues
+                if residue.resname == "UNX":
+                    continue
+
+                # get residue from CCD (protonated also by Dimorphite-DL)
                 residue.hydride_mask = True
                 try:
                     CCD_mol, warning = residues_processed_by_hydride_formal_charges[residue.resname]
@@ -257,6 +263,7 @@ class StructurePreparer:
                                             warning=warning)
 
                 if CCD_mol:
+
                     # map charges from CCD and Dimorphite-DL to residuum from structure
                     res_atoms = sorted(residue.get_atoms(), key=lambda x: x.serial_number)
                     selector.full_ids = set([atom.full_id for atom in res_atoms])
@@ -502,4 +509,3 @@ class StructurePreparer:
         if self.delete_auxiliary_files:
             system(f"cd {self.data_dir} ; rm *.txt *.pdb")
         self.logger.print("ok")
-        
