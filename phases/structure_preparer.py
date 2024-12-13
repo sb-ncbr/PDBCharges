@@ -83,17 +83,19 @@ class StructurePreparer:
                 supplier = Chem.SDMolSupplier()
                 supplier.SetData(CCD_mol_sdf)
                 CCD_mol = next(supplier)
-                if CCD_mol is None:
+                if CCD_mol is None or mol_name in ["UNX", "UNL"]:
                     molecules[mol_name] = (None,
                                            "The molecule cannot be loaded by RDKit and therefore the residue is left neutral.")
                 else:
-                    CCD_mol = Chem.RemoveAllHs(CCD_mol)
+                    CCD_mol = Chem.RemoveAllHs(mol=CCD_mol,
+                                               sanitize=False)
                     CCD_mol_smiles = Chem.MolToSmiles(CCD_mol)
 
                     # add charges to structure by Dimorphite-DL
                     dimorphite_smiles = dimorphite.protonate(CCD_mol_smiles)[0]
                     dimorphite_mol = Chem.MolFromSmiles(dimorphite_smiles)
-                    dimorphite_mol = Chem.RemoveAllHs(dimorphite_mol)
+                    dimorphite_mol = Chem.RemoveAllHs(mol=dimorphite_mol,
+                                                      sanitize=False)
 
                     # Map original mol and mol processed by Dimorphite-DL
                     params = rdFMCS.MCSParameters()
@@ -140,6 +142,8 @@ class StructurePreparer:
         """
 
         self.logger.print("Fixing structure... ", end="")
+
+        # load structure by PDBFixer
         fixer = PDBFixer(filename=self.input_PDB_file)
 
         # download templates for heteroresidues
@@ -165,11 +169,20 @@ class StructurePreparer:
                                     warning=warning)
         fixer.addMissingAtoms()
         openmm_PDB.writeFile(fixer.topology, fixer.positions, open(f"{self.data_dir}/pdbfixer.pdb", 'w'), keepIds=True)
+
+        # remove atoms with duplicit names
+        # duplicit atoms could be directly in PDB or can be produces as bug in PDBFixer (2ki4)
+        structure = biopython_PDB.PDBParser(QUIET=True).get_structure(id="structure",
+                                                                      file=f"{self.data_dir}/pdbfixer.pdb")[0]
+        io = biopython_PDB.PDBIO()
+        io.set_structure(structure)
+        io.save(file=f"{self.data_dir}/duplicate_atoms_removed.pdb")
+
         self.logger.print("ok")
 
     def remove_hydrogens(self):
         self.logger.print("Removing hydrogens ... ", end="")
-        protein = biotite.load_structure(file_path=f"{self.data_dir}/pdbfixer.pdb",
+        protein = biotite.load_structure(file_path=f"{self.data_dir}/duplicate_atoms_removed.pdb",
                                          model=1,
                                          include_bonds=True)
         protein_without_hydrogens = protein[protein.element != "H"]
@@ -233,8 +246,7 @@ class StructurePreparer:
         rdkit_biotite_bonds_converter = {Chem.BondType.SINGLE: BondType.SINGLE,
                                          Chem.BondType.DOUBLE: BondType.DOUBLE}
 
-        residues_processed_by_hydride = [res for res in structure.get_residues() if
-                                         res.resname not in residues_processed_by_pdb2pqr]
+        residues_processed_by_hydride = [res for res in structure.get_residues() if res.resname not in residues_processed_by_pdb2pqr]
 
         if residues_processed_by_hydride:
             # load formal charges for ligand from CCD. Add other formal charges by Dimorphite-DL
@@ -243,7 +255,7 @@ class StructurePreparer:
             for residue in residues_processed_by_hydride:
 
                 # skip unknown residues
-                if residue.resname == "UNX":
+                if residue.resname in ["UNX", "UNL"]:
                     continue
 
                 # get residue from CCD (protonated also by Dimorphite-DL)
@@ -272,7 +284,8 @@ class StructurePreparer:
                     rdkit_mol = Chem.MolFromPDBFile(molFileName=f"{self.data_dir}/{residue.resname}_{residue.id[1]}.pdb",
                                                     removeHs=False,
                                                     sanitize=False)
-                    rdkit_mol = Chem.RemoveAllHs(rdkit_mol)
+                    rdkit_mol = Chem.RemoveAllHs(mol=rdkit_mol,
+                                                 sanitize=False)
                     params = rdFMCS.MCSParameters()
                     params.AtomTyper = rdFMCS.AtomCompare.CompareElements
                     params.BondTyper = rdFMCS.BondCompare.CompareAny
@@ -452,20 +465,25 @@ class StructurePreparer:
         """
 
         self.logger.print("Adding hydrogens by moleculekit... ", end="")
-        molecule = moleculekit_PDB.Molecule(f"{self.data_dir}/hydride.pdb")
-        original_stdout = sys.stdout # redirect moleculekit output to files
-        sys.stdout = open(f"{self.data_dir}/moleculekit_chains_report.txt", 'w')
-        logger.propagate = False
-        file_handler = logging.FileHandler(f"{self.data_dir}/moleculekit_report.txt")
-        logger.addHandler(file_handler)
-        prepared_molecule, details = moleculekit_system_prepare(molecule,
-                                                                pH=self.pH,
-                                                                hold_nonpeptidic_bonds=False,
-                                                                ignore_ns_errors=True,
-                                                                _molkit_ff=False,
-                                                                return_details=True)
-        sys.stdout = original_stdout
-        prepared_molecule.write(f"{self.data_dir}/moleculekit.pdb")
+        try:
+            original_stdout = sys.stdout  # redirect moleculekit output to files
+            sys.stdout = open(f"{self.data_dir}/moleculekit_chains_report.txt", 'w')
+            logger.propagate = False
+            file_handler = logging.FileHandler(f"{self.data_dir}/moleculekit_report.txt")
+            logger.addHandler(file_handler)
+            molecule = moleculekit_PDB.Molecule(f"{self.data_dir}/hydride.pdb")
+            prepared_molecule, details = moleculekit_system_prepare(molecule,
+                                                                    pH=self.pH,
+                                                                    hold_nonpeptidic_bonds=False,
+                                                                    ignore_ns_errors=True,
+                                                                    _molkit_ff=False,
+                                                                    return_details=True)
+            prepared_molecule.write(f"{self.data_dir}/moleculekit.pdb")
+            sys.stdout = original_stdout
+        except:
+            sys.stdout = original_stdout
+            self.logger.print("\nERROR! The molecule is not processable by the moleculekit library.", end="\n")
+            exit()
 
         # combine structures from hydride and moleculekit
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
@@ -497,8 +515,7 @@ class StructurePreparer:
         # export pdb to mmcif, because biopython is not so good in such exporting
         protein = biotite.load_structure(f"{self.data_dir}/combined.pdb",
                                          model=1,
-                                         extra_fields=["b_factor", "occupancy"],
-                                         include_bonds=True)
+                                         extra_fields=["b_factor", "occupancy"])
         biotite.save_structure(f"{self.data_dir}/{self.output_mmCIF_file}", protein)
 
         if self.save_charges_estimation:
