@@ -11,7 +11,9 @@ from biotite.structure import io as biotite
 from dimorphite_dl import DimorphiteDL
 from moleculekit import molecule as moleculekit_PDB
 from moleculekit.tools.preparation import systemPrepare as moleculekit_system_prepare, logger
-from openmm.app import PDBFile as openmm_PDB
+from mypy.memprofile import defaultdict
+from openmm.app import PDBFile as openmm_PDB, ForceField
+from openmm import NonbondedForce
 from pdbfixer import PDBFixer
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
@@ -25,6 +27,12 @@ class AtomSelector(biopython_PDB.Select):
     def accept_atom(self, atom):
         return int(atom.full_id in self.full_ids)
 
+class NucleicSelector(biopython_PDB.Select):
+    """
+    Support class for Biopython.
+    """
+    def accept_residue(self, residue):
+        return int(biopython_PDB.Polypeptide.is_nucleic(residue))
 
 class StructurePreparer:
     """
@@ -87,15 +95,13 @@ class StructurePreparer:
                     molecules[mol_name] = (None,
                                            "The molecule cannot be loaded by RDKit and therefore the residue is left neutral.")
                 else:
-                    CCD_mol = Chem.RemoveAllHs(mol=CCD_mol,
-                                               sanitize=False)
+                    CCD_mol = Chem.RemoveAllHs(CCD_mol)
                     CCD_mol_smiles = Chem.MolToSmiles(CCD_mol)
 
                     # add charges to structure by Dimorphite-DL
                     dimorphite_smiles = dimorphite.protonate(CCD_mol_smiles)[0]
                     dimorphite_mol = Chem.MolFromSmiles(dimorphite_smiles)
-                    dimorphite_mol = Chem.RemoveAllHs(mol=dimorphite_mol,
-                                                      sanitize=False)
+                    dimorphite_mol = Chem.RemoveAllHs(dimorphite_mol)
 
                     # Map original mol and mol processed by Dimorphite-DL
                     params = rdFMCS.MCSParameters()
@@ -181,7 +187,7 @@ class StructurePreparer:
         self.logger.print("ok")
 
     def remove_hydrogens(self):
-        self.logger.print("Removing hydrogens ... ", end="")
+        self.logger.print("Removing hydrogens... ", end="")
         protein = biotite.load_structure(file_path=f"{self.data_dir}/duplicate_atoms_removed.pdb",
                                          model=1,
                                          include_bonds=True)
@@ -226,7 +232,8 @@ class StructurePreparer:
         # Biopython works with atoms hierarchically through chain, residue, atom
         # however, the order of atoms in the file may be different
         # we create a list that is sorted by serial_number and work with it
-        structure_atoms = sorted(structure.get_atoms(), key=lambda x: x.serial_number)
+        structure_atoms = sorted(structure.get_atoms(),
+                                 key=lambda x: x.serial_number)
         selector = AtomSelector()
         io = biopython_PDB.PDBIO()
         io.set_structure(structure)
@@ -277,7 +284,8 @@ class StructurePreparer:
                 if CCD_mol:
 
                     # map charges from CCD and Dimorphite-DL to residuum from structure
-                    res_atoms = sorted(residue.get_atoms(), key=lambda x: x.serial_number)
+                    res_atoms = sorted(residue.get_atoms(),
+                                       key=lambda x: x.serial_number)
                     selector.full_ids = set([atom.full_id for atom in res_atoms])
                     io.save(file=f"{self.data_dir}/{residue.resname}_{residue.id[1]}.pdb",
                             select=selector)
@@ -391,17 +399,8 @@ class StructurePreparer:
         # final definition which atoms should be processed by hydride
         # hydrogens should by added to DNA and RNA by moleculekit because of charge consistency
         # (Dimorphite-DL charges nucleic acids differently then moleculekit)
-        nucleic_acids = {'DA', 'DA3', 'DA5',
-                        'DC', 'DC3', 'DC5',
-                        'DG', 'DG3', 'DG5',
-                        'DT', 'DT3', 'GLH',
-                        'RA', 'RA3', 'RA5',
-                        'RC', 'RC3', 'RC5',
-                        'RG', 'RG3', 'RG5',
-                        'RU', 'RU3', 'RU5'
-                        "A", "C", "G", "U"}
         for residue in structure.get_residues():
-            if hasattr(residue, "hydride_mask") and residue.resname not in nucleic_acids:
+            if hasattr(residue, "hydride_mask") and not biopython_PDB.Polypeptide.is_nucleic(residue):
                 for atom in residue.get_atoms():
                     atom.hydride_mask = True
 
@@ -437,7 +436,7 @@ class StructurePreparer:
 
         # estimation of charges for standard aminoacids processed by hydride
         # the function hydride.estimate_amino_acid_charges has errors, and therefore
-        # we cotroll to avoid assigning charges to atoms involved in an interresidual bond
+        # we control to avoid assigning charges to atoms involved in an interresidual bond
         hydride_estimated_charges = hydride.estimate_amino_acid_charges(protein, ph=self.pH)
         interresidual_bonds_atom_indices = set(atom_i for bond in interresidual_bonds for atom_i in bond)
         for i, (atom, hydride_estimated_charge) in enumerate(zip(structure_atoms, hydride_estimated_charges)):
@@ -455,6 +454,24 @@ class StructurePreparer:
         self.hydride_mask = protein_with_hydrogens.hydride_mask
         biotite.save_structure(file_path=f"{self.data_dir}/hydride.pdb",
                                array=protein_with_hydrogens)
+
+        # parse warnings from hydride
+        hydride_residual_warnings = defaultdict(list)
+        warning_lines = [line.strip() for line in open(f"{self.data_dir}/hydride.txt", 'r').readlines() if "Missing fragment for atom" in line]
+        for warning_line in warning_lines:
+            sl = warning_line.split()
+            a_index = int(sl[-1])
+            a_name = sl[-4]
+            hydride_residual_warnings[(protein.chain_id[a_index],
+                                       protein.res_id[a_index],
+                                       protein.res_name[a_index])].append(a_name[1:-1]) # remove the quotes
+        for (chain, resnum, resname), atoms in hydride_residual_warnings.items():
+            warning = f"Hydrogens or formal charges can be added incorrectly because the hydride tool does not have fragment(s) for the atom(s) {' '.join(atoms)}."
+            self.logger.add_warning(chain=chain,
+                                    resnum=resnum,
+                                    resname=resname,
+                                    warning=warning)
+
         self.logger.print("ok")
 
     def add_hydrogens_by_moleculekit(self):
@@ -498,8 +515,10 @@ class StructurePreparer:
                                                                                file=f"{self.data_dir}/moleculekit.pdb")[0]
         for atom, moleculekit_charge in zip(combined_structure.get_atoms(), pdb2pqr_charges):
             atom.charge_estimation = moleculekit_charge
-        for h_chain, c_chain in zip(sorted(hydride_structure), sorted(combined_structure)):
-            for res_i, (h_res, c_res) in enumerate(zip(sorted(h_chain), sorted(c_chain))):
+        for h_chain, c_chain in zip(sorted(hydride_structure),
+                                    sorted(combined_structure)):
+            for res_i, (h_res, c_res) in enumerate(zip(sorted(h_chain),
+                                                       sorted(c_chain))):
                 c_res.resname = h_res.resname # rename amber residue names from moleculekit back
                 if any([atom.hydride_mask for atom in h_res]):
                     combined_structure[c_chain.id].detach_child(c_res.id)
@@ -509,8 +528,12 @@ class StructurePreparer:
             atom.serial_number = i
         io = biopython_PDB.PDBIO()
         io.set_structure(combined_structure)
-        io.save(file=f"{self.data_dir}/combined.pdb",
-                preserve_atom_numbering=True)
+        try:
+            io.save(file=f"{self.data_dir}/combined.pdb",
+                    preserve_atom_numbering=True)
+        except:
+            self.logger.print("\nERROR! The molecule has more then 99999 atoms.", end="\n")
+            exit()
 
         # export pdb to mmcif, because biopython is not so good in such exporting
         protein = biotite.load_structure(f"{self.data_dir}/combined.pdb",
@@ -519,6 +542,27 @@ class StructurePreparer:
         biotite.save_structure(f"{self.data_dir}/{self.output_mmCIF_file}", protein)
 
         if self.save_charges_estimation:
+            if any(biopython_PDB.Polypeptide.is_nucleic(residue) for residue in combined_structure.get_residues()):
+                # estimate charges also for DNA and RNA
+                try:
+                    io.save(file=f"{self.data_dir}/only_DNA_and_RNA.pdb",
+                            select=NucleicSelector(),
+                            preserve_atom_numbering=True)
+                    pdb = openmm_PDB(f"{self.data_dir}/only_DNA_and_RNA.pdb")
+                    forcefield = ForceField('amber14-all.xml', 'amber14/tip3pfb.xml')
+                    ff_system = forcefield.createSystem(pdb.topology)
+                    nonbonded = [f for f in ff_system.getForces() if isinstance(f, NonbondedForce)][0]
+                    charges = [nonbonded.getParticleParameters(i)[0]._value for i in range(ff_system.getNumParticles())]
+                    DNARNA_structure = biopython_PDB.PDBParser(QUIET=True).get_structure(id="structure",
+                                                                                         file=f"{self.data_dir}/only_DNA_and_RNA.pdb")[0]
+                    for atom, charge in zip(sorted(DNARNA_structure.get_atoms(),
+                                                   key=lambda x: x.serial_number),
+                                            charges):
+                        combined_structure[atom.get_parent().get_parent().id][atom.get_parent().id][atom.id].charge_estimation = charge
+                except:
+                    self.logger.print("\nERROR! Estimation of partial atomic charges for DNA and RNA failed.", end="\n")
+                    exit()
+
             with open(f"{self.data_dir}/estimated_charges.txt", "w") as charges_file:
                 charges_string = " ".join([str(round(atom.charge_estimation, 4)) for atom in combined_structure.get_atoms()])
                 charges_file.write(charges_string)
