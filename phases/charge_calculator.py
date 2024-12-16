@@ -80,7 +80,7 @@ class ChargeCalculator:
         # calculate the charges for each atom using the cutoff approach.
         self.logger.print("Calculating of patial atomic charges... ", end="", silence=True)
         for calculated_atom_i, calculated_atom in enumerate(tqdm.tqdm(structure_atoms,
-                                                                      desc="Charges calculation",
+                                                                      desc="Charge calculation",
                                                                       unit="atoms",
                                                                       smoothing=0,
                                                                       delay=0.1,
@@ -261,7 +261,7 @@ class ChargeCalculator:
                                         resnum=residue.id[1],
                                         resname=residue.resname,
                                         warning=warning)
-        self.logger.print("ok... ", silence=True)
+        self.logger.print("ok", silence=True)
 
 
     def write_charges_to_files(self):

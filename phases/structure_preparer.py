@@ -11,7 +11,7 @@ from biotite.structure import io as biotite
 from dimorphite_dl import DimorphiteDL
 from moleculekit import molecule as moleculekit_PDB
 from moleculekit.tools.preparation import systemPrepare as moleculekit_system_prepare, logger
-from mypy.memprofile import defaultdict
+from collections import defaultdict
 from openmm.app import PDBFile as openmm_PDB, ForceField
 from openmm import NonbondedForce
 from pdbfixer import PDBFixer
@@ -53,6 +53,7 @@ class StructurePreparer:
         """
         :param input_PDB_file: PDB file containing the structure which should be prepared
         :param CCD_file: SDF file with Chemical Component Dictionary
+        :param logger: loger of workflow to unify outputs
         :param data_dir: directory where the results will be stored
         :param output_mmCIF_file: mmCIF file in which prepared structure will be stored
         :param delete_auxiliary_files: auxiliary files created during the preraparation will be deleted
@@ -349,10 +350,10 @@ class StructurePreparer:
                                                                 warning=warning)
 
                 # find interrezidual covalent bonds and modify charge estimation for specific cases
-                res_center = residue.center_of_mass(geometric=True)
-                res_radius = max([dist(res_center, atom.coord) for atom in residue.get_atoms()])
-                substructure_atoms = kdtree.search(center=res_center,
-                                                   radius=res_radius + 5,
+                residue_center = residue.center_of_mass(geometric=True)
+                residue_radius = max([dist(residue_center, atom.coord) for atom in residue.get_atoms()])
+                substructure_atoms = kdtree.search(center=residue_center,
+                                                   radius=residue_radius + 5,
                                                    level="A")
                 substructure_atoms.sort(key=lambda x: x.serial_number)
                 selector.full_ids = set([atom.full_id for atom in substructure_atoms])
@@ -501,7 +502,9 @@ class StructurePreparer:
             sys.stdout = original_stdout
             self.logger.print("\nERROR! The molecule is not processable by the moleculekit library.", end="\n")
             exit()
+        self.logger.print("ok")
 
+        self.logger.print("Writing prepared structure to file... ", end="")
         # combine structures from hydride and moleculekit
         pdb2pqr_charges = np.nan_to_num(prepared_molecule.charge)
         hydride_structure = biopython_PDB.PDBParser(QUIET=True).get_structure(id="structure",
