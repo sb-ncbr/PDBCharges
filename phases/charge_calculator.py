@@ -200,6 +200,10 @@ class ChargeCalculator:
                 # calculate charges for substructure
                 substructure_charge = round(sum([atom.charge_estimation for atom in substructure_atoms]))
                 system(f"cd {substructure_data_dir} ; "
+                       f"ulimit -s unlimited ;"
+                       f"export OMP_NUM_THREADS=1,1 ;"
+                       f"export OMP_MAX_ACTIVE_LEVELS=1 ;"
+                       f"export MKL_NUM_THREADS=1 ;"
                        f"xtb repaired_substructure.pdb --gfn 1 --gbsa water --acc 1000 --chrg {substructure_charge}   > xtb_output.txt 2> xtb_error_output.txt ")
 
                 # read calculated charges from xtb output file
