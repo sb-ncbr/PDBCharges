@@ -84,6 +84,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gfortran \
     nano \
     wget \
+    procps \
     openbabel=3.1.1+dfsg-9+b3 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
