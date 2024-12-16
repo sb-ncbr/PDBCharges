@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
+import json
 from collections import defaultdict
 from os import path, system, listdir
 
 from phases.charge_calculator import ChargeCalculator
 from phases.structure_preparer import StructurePreparer
+from phases.hydrogen_optimiser import HydrogenOptimiser
 
 
 def load_arguments():
@@ -46,6 +47,7 @@ class Logger:
                  warning_file: str):
         self.output_file = output_file
         self.warning_file = warning_file
+        self.warnings = defaultdict(list)
 
     def print(self,
               text: str,
@@ -61,8 +63,17 @@ class Logger:
                     resname: str,
                     resnum: str,
                     warning: str):
-        with open(self.warning_file, "a") as log_file:
-            log_file.write(f"{chain};{resnum};{resname};{warning}\n")
+        self.warnings[(chain, int(resnum), resname)].append(warning)
+
+    def write_warnings(self):
+        json_warnings = []
+        for (chain_id, residue_id, residue_name), warnings in sorted(self.warnings.items()):
+            json_warnings.append({"chain_id": chain_id,
+                                  "residue_id": residue_id,
+                                  "residue_name": residue_name,
+                                  "warning": " ".join(warnings)})
+        with open(self.warning_file, 'w') as warning_file:
+            warning_file.write(json.dumps(json_warnings, indent=4))
 
 if __name__ == "__main__":
     args = load_arguments()
@@ -75,7 +86,7 @@ if __name__ == "__main__":
            f"mkdir {results_directory}; "
            f"cp {args.PDB_file} {args.data_dir}/input_PDB")
 
-    residual_warnings_file = f"{results_directory}/residual_warnings.csv"
+    residual_warnings_file = f"{results_directory}/residual_warnings.json"
     logger = Logger(output_file=f"{results_directory}/output.txt",
                     warning_file=residual_warnings_file)
 
@@ -95,8 +106,19 @@ if __name__ == "__main__":
     structure_preparer.add_hydrogens_by_hydride()
     structure_preparer.add_hydrogens_by_moleculekit()
 
+    # optimize added hydrogens
+    hydrogen_optimiser_input = f"{structure_preparer_data_directory}/{structure_preparer_output}"
+    hydrogen_optimiser_data_directory = f"{args.data_dir}/hydrogen_optimiser"
+    hydrogen_optimiser_output = f"{path.basename(args.PDB_file)[:-4]}_optimisedH.cif"
+    hydrogen_optimiser = HydrogenOptimiser(input_mmCIF_file=hydrogen_optimiser_input,
+                                           logger=logger,
+                                           output_mmCIF_file=hydrogen_optimiser_output,
+                                           data_dir=hydrogen_optimiser_data_directory,
+                                           delete_auxiliary_files=args.delete_auxiliary_files)
+    hydrogen_optimiser.optimise()
+
     # calculate partial atomic charges
-    charge_calculator_input = f"{structure_preparer_data_directory}/{structure_preparer_output}"
+    charge_calculator_input = f"{hydrogen_optimiser_data_directory}/{hydrogen_optimiser_output}"
     charge_calculator_data_directory = f"{args.data_dir}/charge_calculator"
     charge_calculator_output = f"{path.basename(args.PDB_file)[:-4]}.cif"
     charges_estimation = f"{structure_preparer_data_directory}/estimated_charges.txt"
@@ -111,17 +133,4 @@ if __name__ == "__main__":
 
     system(f"cp {charge_calculator_data_directory}/{charge_calculator_output} {results_directory}")
 
-    # merge and sort warnings for residues
-    if path.exists(residual_warnings_file):
-        residual_warnings = defaultdict(list)
-        with open(residual_warnings_file, "r") as f:
-            for chain, res_num, res_name, warning in list(csv.reader(f, delimiter=";")):
-                residual_warnings[(chain, int(res_num), res_name)].append(warning)
-        warnings = sorted([(chain, res_num, res_name, " ".join(warning)) for (chain, res_num, res_name), warning in residual_warnings.items()])
-        with open(residual_warnings_file, 'w') as f:
-            csv_writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_NONNUMERIC)
-            for line in warnings:
-                csv_writer.writerow(line)
-
-# zkusit jak moc se zmněí náboje s a bez amberu
-# todo optimalizace vodíků
+    logger.write_warnings()
