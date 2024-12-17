@@ -47,12 +47,13 @@ class HydrogenOptimiser:
 
         # load structure by Biopython
         self.logger.print("Loading structure... ", end="")
-        self.structure = MMCIFParser(QUIET=True).get_structure(structure_id="structure",
-                                                               filename=self.input_mmCIF_file)[0]
-        self.io = PDBIO()
-        self.io.set_structure(self.structure)
+        structure = MMCIFParser(QUIET=True).get_structure(structure_id="structure",
+                                                          filename=self.input_mmCIF_file)
+        io = PDBIO()
+        io.set_structure(structure)
+        self.io = io
+        self.structure = io.structure[0]
         self.selector = AtomSelector()
-        self.kdtree = NeighborSearch(list(self.structure.get_atoms()))
         self.logger.print("ok")
 
         self.logger.print("Optimisation of hydrogens... ", end="", silence=True)
@@ -96,37 +97,38 @@ class HydrogenOptimiser:
                       central_atom):
 
         # creation of substructure
+        self.kdtree = NeighborSearch(list(self.structure.get_atoms()))
         substructure_data_dir = f"{self.data_dir}/sub_{central_atom.serial_number}"
         system(f"mkdir {substructure_data_dir}")
         bonded_hydrogens = [atom for atom in self.kdtree.search(center=central_atom.coord,
-                                                                radius=1.5,
+                                                                radius=3,
                                                                 level="A") if atom.element == "H"]
         if not bonded_hydrogens:
             return
         bonded_hydrogens_full_ids = (set(atom.full_id for atom in bonded_hydrogens))
 
         # create and save min_radius and max_radius substructures by biopython
-        atoms_in_5A = self.kdtree.search(center=central_atom.coord,
-                                         radius=5,
+        atoms_in_6A = self.kdtree.search(center=central_atom.coord,
+                                         radius=6,
                                          level="A")
-        atoms_in_10A = self.kdtree.search(center=central_atom.coord,
-                                          radius=10,
+        atoms_in_12A = self.kdtree.search(center=central_atom.coord,
+                                          radius=12,
                                           level="A")
-        self.selector.full_ids = set([atom.full_id for atom in atoms_in_5A])
-        self.io.save(file=f"{substructure_data_dir}/atoms_in_5A.pdb",
+        self.selector.full_ids = set([atom.full_id for atom in atoms_in_6A])
+        self.io.save(file=f"{substructure_data_dir}/atoms_in_6A.pdb",
                      select=self.selector,
                      preserve_atom_numbering=True)
-        self.selector.full_ids = set([atom.full_id for atom in atoms_in_10A])
-        self.io.save(file=f"{substructure_data_dir}/atoms_in_10A.pdb",
+        self.selector.full_ids = set([atom.full_id for atom in atoms_in_12A])
+        self.io.save(file=f"{substructure_data_dir}/atoms_in_12A.pdb",
                      select=self.selector,
                      preserve_atom_numbering=True)
 
         # load substructures by RDKit to determine bonds
-        mol_min_radius = Chem.MolFromPDBFile(molFileName=f"{substructure_data_dir}/atoms_in_5A.pdb",
+        mol_min_radius = Chem.MolFromPDBFile(molFileName=f"{substructure_data_dir}/atoms_in_6A.pdb",
                                              removeHs=False,
                                              sanitize=False)
         mol_min_radius_conformer = mol_min_radius.GetConformer()
-        mol_max_radius = Chem.MolFromPDBFile(molFileName=f"{substructure_data_dir}/atoms_in_10A.pdb",
+        mol_max_radius = Chem.MolFromPDBFile(molFileName=f"{substructure_data_dir}/atoms_in_12A.pdb",
                                              removeHs=False,
                                              sanitize=False)
         mol_max_radius_conformer = mol_max_radius.GetConformer()
@@ -210,6 +212,7 @@ class HydrogenOptimiser:
         # optimise substructure by xtb
         xtb_settings_template = """$constrain
         atoms: xxx
+        force constant=10
         $end
         $opt
         engine=rf
