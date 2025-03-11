@@ -571,5 +571,5 @@ class StructurePreparer:
                 charges_file.write(charges_string)
 
         if self.delete_auxiliary_files:
-            system(f"cd {self.data_dir} ; rm *.txt *.pdb")
+            system(f"cd {self.data_dir} ; rm *.pdb hydride.txt moleculekit_chains_report.txt moleculekit_report.txt")
         self.logger.print("ok")

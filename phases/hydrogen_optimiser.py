@@ -89,8 +89,6 @@ class HydrogenOptimiser:
         self.io = MMCIFIO()
         self.io.set_structure(self.structure)
         self.io.save(f"{self.data_dir}/{self.output_mmCIF_file}")
-        if self.delete_auxiliary_files:
-            system(f"for au_file in {self.data_dir}/sub_* ; do rm -fr $au_file ; done &")
         self.logger.print("ok")
 
     def optimise_atom(self,
@@ -253,3 +251,7 @@ class HydrogenOptimiser:
         else:
             for hydrogen in bonded_hydrogens:
                 hydrogen.optimised = False
+
+        if self.delete_auxiliary_files:
+            system(f"rm -r {substructure_data_dir}")
+
