@@ -150,6 +150,17 @@ class StructurePreparer:
 
         self.logger.print("Fixing structure... ", end="")
 
+        # select alternative locations
+        lines_without_alternative_positions = []
+        with open(self.input_PDB_file, "r") as pdb_file:
+            for line in pdb_file.readlines():
+                if line.startswith("ATOM") or line.startswith("HETATM"):
+                    if line[16] not in [" ", "A"]:
+                        continue
+                lines_without_alternative_positions.append(line)
+        with open(self.input_PDB_file, "w") as pdb_file:
+            pdb_file.write("".join(lines_without_alternative_positions))
+
         # load structure by PDBFixer
         fixer = PDBFixer(filename=self.input_PDB_file)
 
@@ -255,6 +266,13 @@ class StructurePreparer:
                                          Chem.BondType.DOUBLE: BondType.DOUBLE}
 
         residues_processed_by_hydride = [res for res in structure.get_residues() if res.resname not in residues_processed_by_pdb2pqr]
+        # first residues from DNA and RNA chains should be processed by hydride because moleculekit removes atom
+        for chain in structure.get_chains():
+            first_residue = list(chain.get_residues())[0]
+            if biopython_PDB.Polypeptide.is_nucleic(first_residue) and first_residue not in residues_processed_by_hydride:
+                residues_processed_by_hydride.append(first_residue)
+                for atom in first_residue.get_atoms():
+                    atom.hydride_mask = True
 
         if residues_processed_by_hydride:
             # load formal charges for ligand from CCD. Add other formal charges by Dimorphite-DL
@@ -281,9 +299,7 @@ class StructurePreparer:
                                             resnum=residue.id[1],
                                             resname=residue.resname,
                                             warning=warning)
-
-                if CCD_mol:
-
+                else:
                     # map charges from CCD and Dimorphite-DL to residuum from structure
                     res_atoms = sorted(residue.get_atoms(),
                                        key=lambda x: x.serial_number)
@@ -397,6 +413,12 @@ class StructurePreparer:
                         ba1_res.hydride_mask = True
                         ba2_res.hydride_mask = True
 
+                # nitrogens in DNA and RNA should be neutral
+                if biopython_PDB.Polypeptide.is_nucleic(first_residue):
+                    for atom in residue.get_atoms():
+                        if atom.element == "N":
+                            atom.charge_estimation = 0
+
         # final definition which atoms should be processed by hydride
         # hydrogens should by added to DNA and RNA by moleculekit because of charge consistency
         # (Dimorphite-DL charges nucleic acids differently then moleculekit)
@@ -453,6 +475,24 @@ class StructurePreparer:
         sys.stderr = original_stderr
         self.hydride_charges = protein_with_hydrogens.charge
         self.hydride_mask = protein_with_hydrogens.hydride_mask
+
+        # modify atom names with more symbols than 4
+        residue_atom_names = defaultdict(set)
+        for atom_name, chain_id, res_id in zip(protein_with_hydrogens.atom_name,
+                                               protein_with_hydrogens.chain_id,
+                                               protein_with_hydrogens.res_id):
+            residue_atom_names[(chain_id, res_id)].add(atom_name)
+
+        for i, (atom_name, chain_id, res_id) in enumerate(zip(protein_with_hydrogens.atom_name,
+                                                              protein_with_hydrogens.chain_id,
+                                                              protein_with_hydrogens.res_id)):
+            if len(atom_name) > 4:
+                for x in range(1,1000):
+                    candidate_name = f"{atom_name[0]}{x}"
+                    if candidate_name not in residue_atom_names[(chain_id, res_id)]:
+                        protein_with_hydrogens.atom_name[i] = candidate_name
+                        residue_atom_names[(chain_id, res_id)].add(candidate_name)
+                        break
         biotite.save_structure(file_path=f"{self.data_dir}/hydride.pdb",
                                array=protein_with_hydrogens)
 
@@ -563,8 +603,17 @@ class StructurePreparer:
                                             charges):
                         combined_structure[atom.get_parent().get_parent().id][atom.get_parent().id][atom.id].charge_estimation = charge
                 except:
-                    self.logger.print("\nERROR! Estimation of partial atomic charges for DNA and RNA failed.", end="\n")
-                    exit()
+                    kdtree = biopython_PDB.NeighborSearch(list(combined_structure.get_atoms()))
+                    for residue in combined_structure.get_residues():
+                        if biopython_PDB.Polypeptide.is_nucleic(residue):
+                            phosphorus_atoms = [atom for atom in residue.get_atoms() if atom.element == "P"]
+                            for phosphorus_atom in phosphorus_atoms:
+                                neighbors_atoms = kdtree.search(center=phosphorus_atom.coord,
+                                                                radius=1.8,
+                                                                level="A")
+                                neighbors_oxygens = [atom for atom in neighbors_atoms if atom.element == "O"]
+                                if len(neighbors_oxygens) == 4 and sum(atom.charge_estimation for atom in neighbors_oxygens) == 0:
+                                    phosphorus_atom.charge_estimation = -1
 
             with open(f"{self.data_dir}/estimated_charges.txt", "w") as charges_file:
                 charges_string = " ".join([str(round(atom.charge_estimation, 4)) for atom in combined_structure.get_atoms()])
