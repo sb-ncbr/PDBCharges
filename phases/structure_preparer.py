@@ -414,7 +414,7 @@ class StructurePreparer:
                         ba2_res.hydride_mask = True
 
                 # nitrogens in DNA and RNA should be neutral
-                if biopython_PDB.Polypeptide.is_nucleic(first_residue):
+                if biopython_PDB.Polypeptide.is_nucleic(residue):
                     for atom in residue.get_atoms():
                         if atom.element == "N":
                             atom.charge_estimation = 0
