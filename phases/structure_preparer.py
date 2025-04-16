@@ -150,17 +150,6 @@ class StructurePreparer:
 
         self.logger.print("Fixing structure... ", end="")
 
-        # select alternative locations
-        lines_without_alternative_positions = []
-        with open(self.input_PDB_file, "r") as pdb_file:
-            for line in pdb_file.readlines():
-                if line.startswith("ATOM") or line.startswith("HETATM"):
-                    if line[16] not in [" ", "A"]:
-                        continue
-                lines_without_alternative_positions.append(line)
-        with open(self.input_PDB_file, "w") as pdb_file:
-            pdb_file.write("".join(lines_without_alternative_positions))
-
         # load structure by PDBFixer
         fixer = PDBFixer(filename=self.input_PDB_file)
 
