@@ -396,7 +396,7 @@ class StructurePreparer:
                         if ba2.charged_by_dimorphite:
                             ba2.charge_estimation = 0
                         # if the bond was detected by RDKit and not Biotite, create it
-                        if frozenset((ba1_index, ba1_index)) not in biotite_bonds_set:
+                        if frozenset((ba1_index, ba2_index)) not in biotite_bonds_set:
                             biotite_bond_type = rdkit_biotite_bonds_converter.get(bond.GetBondType(), BondType.ANY)
                             protein.bonds.add_bond(ba1_index, ba2_index, biotite_bond_type)
                         ba1_res.hydride_mask = True
